@@ -227,6 +227,8 @@ fn pushThunk(ctx: *anyopaque, ev: Event.Core) void {
 }
 
 fn textThunk(ctx: *anyopaque, window_id: u32, text: []const u8) void {
+    // Backends normalize text to UTF-8 before calling this; the bytes are
+    // copied only to keep the event alive until Backend.uninit.
     const self: *Backend = @ptrCast(@alignCast(ctx));
     const copy = self.alloc.dupe(u8, text) catch |err| {
         General.reportError(err);

@@ -33,7 +33,8 @@ pub const WindowScaleChanged = struct { window_id: u32, scale: f32 };
 pub const KeyDown = struct { window_id: u32, key: KeyCode, mods: Mods, repeat: bool };
 pub const KeyUp = struct { window_id: u32, key: KeyCode, mods: Mods };
 
-/// `text` is borrowed and not copied; copy it if it must outlive the event.
+/// UTF-8 committed text (IME/keyboard). Borrowed and not copied; copy it if
+/// it must outlive the event.
 pub const TextInput = struct { window_id: u32, text: []const u8 };
 
 pub const MouseMoved = struct { window_id: u32, x: f32, y: f32, mods: Mods };

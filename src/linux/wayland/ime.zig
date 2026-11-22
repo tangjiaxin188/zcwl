@@ -1,5 +1,10 @@
 //! Optional `zwp_text_input_v3` integration.
 //!
+//! `commit_string` is UTF-8 by protocol and is forwarded unchanged; this
+//! backend does not transcode or normalize it. Other platform backends must
+//! convert their native text (UTF-16, XIM locale strings, ...) to UTF-8 before
+//! producing `Event.TextInput`.
+//!
 //! The protocol object is per seat, not per window, so the backend owns one
 //! `Ime` instance and tracks the window that currently has keyboard focus.
 

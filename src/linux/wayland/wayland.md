@@ -111,6 +111,8 @@ if (linux_backend == .wayland or linux_backend == .both) {
 `protocols.zig` 和 `bindings.h`（translate-c 输入）。
 
 - `-Dwayland-protocols=/path` 可覆盖 XML 目录，默认 `/usr/share/wayland-protocols`；
+- 只有 `-Dbackend=wayland` 才生成协议、链接 `wayland-client` 并解析 Wayland 后端源码；
+  `null` / `x11` 构建通过生成的 `backend_selected.zig` 只导入自己的后端；
 - 构建步骤按顺序：`wayland-scanner client-header` / `private-code` →
   `zig translate-c` 生成 `bindings.zig`；
 - Zig 0.17 移除了 `@cImport`，所以用 `zig translate-c` 生成绑定；

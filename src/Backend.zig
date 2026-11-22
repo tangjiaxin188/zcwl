@@ -1,8 +1,9 @@
-//! Compile-time backend dispatcher. Wayland is implemented; other selections
-//! currently fall back to the null backend.
+//! Compile-time backend dispatcher. `build.zig` generates
+//! `backend_selected.zig` with exactly one backend import, so unselected
+//! backends are not parsed or compiled.
 //!
-//!   .wayland => src/linux/wayland/backend.zig
-//!   .x11 / .both / .windows / .macos / .null => null
+//!   .wayland => linux/wayland/backend.zig
+//!   .x11 / .both / .windows / .macos / .null => null (TODO for non-null)
 
 const std = @import("std");
 
@@ -30,11 +31,7 @@ pub const effective: Kind = switch (kind) {
     .x11, .both, .windows, .macos, .null => .null,
 };
 
-const impl = switch (kind) {
-    .wayland => @import("linux/wayland/backend.zig"),
-    // TODO: x11, both, windows and macos drivers.
-    .x11, .both, .windows, .macos, .null => @import("null/backend.zig"),
-};
+const impl = @import("backend_selected.zig").impl;
 
 /// The backend object stored by `App`.
 pub const Handle = impl.Backend;

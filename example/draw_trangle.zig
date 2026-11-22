@@ -220,7 +220,7 @@ pub const Renderer = struct {
     pub fn draw(self: *Renderer, width: u32, height: u32) void {
         if (width == 0 or height == 0) return;
         self.gl.viewport(0, 0, @intCast(width), @intCast(height));
-        self.gl.clearColor(0.08, 0.09, 0.12, 1.0);
+        self.gl.clearColor(0.08, 0.09, 0.12, 0.2);
         self.gl.clear(gl.GL_COLOR_BUFFER_BIT);
         self.gl.useProgram(self.program);
         self.gl.bindVertexArray(self.vao);

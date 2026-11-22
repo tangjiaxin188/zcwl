@@ -1,0 +1,16 @@
+.{
+    .name = .zcwl,
+    .version = "0.0.1-wl",
+    .fingerprint = 0x4b2d28df3b92daf2,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "example",
+        "test",
+        "LICENSE",
+        "README.md",
+    },
+}

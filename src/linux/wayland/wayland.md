@@ -35,7 +35,8 @@ src/linux/
     ├── display.zig       # wl_display / wl_registry / globals / roundtrip / fd / flush
     ├── event.zig         # 内部 Event.Core 队列、poll/dispatch、事件构造辅助
     ├── window.zig        # wl_surface + xdg_surface + xdg_toplevel：configure/ack、commit、全部 Window 方法
-    ├── input.zig         # wl_seat / wl_pointer / wl_keyboard -> Event.Core；使用 ../xkb.zig
+    ├── input.zig         # wl_seat / wl_pointer / wl_keyboard / wl_touch -> Event.Core；使用 ../xkb.zig
+    ├── tablet.zig        # zwp_tablet_manager_v2 -> Event.Pen*（压感/倾斜/旋转/按键/橡皮擦）
     ├── monitor.zig       # wl_output：geometry/mode/scale/name/hotplug
     ├── cursor.zig        # cursor-shape-v1；set_cursor / hide
     ├── context.zig       # Backend.Context + NativeContext（EGLDisplay/Config/Context/Surface）
@@ -120,7 +121,7 @@ if (linux_backend == .wayland or linux_backend == .both) {
 - 交叉编译需要 host 安装 `wayland-scanner` 和对应协议 XML。
 
 当前扫描的协议：`xdg-shell`、`xdg-decoration-unstable-v1`、`cursor-shape-v1`、
-`tablet-unstable-v2`（cursor-shape 的 C 代码引用 tablet tool 接口）、
+`tablet-unstable-v2`（数位笔事件，同时 cursor-shape 的 C 代码引用 tablet tool 接口）、
 `alpha-modifier-v1`、`text-input-unstable-v3`。
 
 ```bash
@@ -344,7 +345,7 @@ eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_KHR, wl_display, null)
 | `window_scale_changed` | `wl_output.scale` / `wp_fractional_scale_v1.preferred_scale` | 输出 enter/leave 时计算 |
 | `window_focus_gained/lost` | `xdg_toplevel.configure` states 或 keyboard enter/leave | 按实现选择 |
 | `window_minimized/maximized/restored` | `xdg_toplevel.configure` states | `activated`/`maximized`/`fullscreen` |
-| `pen_*` | `zwp_tablet_tool_v2`（可选） | pressure/tilt/rotation；无协议则不产生 |
+| `pen_*` | `zwp_tablet_tool_v2` | pressure/tilt/rotation/eraser；已实现，无协议则不产生 |
 | `custom` | `pushEvent` | 后端不解释 |
 | `unknown` | 未映射事件 | 保留 |
 
@@ -355,7 +356,9 @@ Wayland 没有全局窗口位置，因此通常不产生 `window_moved`；`getPo
 - `wl_keyboard.keymap` 是 fd + size，需要 `mmap` 后交给 `xkb_keymap_new_from_string`；
 - key repeat 由 `wl_keyboard.repeat_info` 的 rate/delay 驱动，后端维护计时；不要依赖 compositor 重发 key；
 - pointer serial 必须保存，用于 `set_cursor`、`set_selection`、drag；
-- `wl_touch` 事件可映射到 mouse 或保留为扩展；当前 `Event.Core` 没有 touch tag，建议先映射为 mouse 或忽略；
+- `wl_touch` 事件映射为鼠标左键：down → `mouse_entered`/`mouse_moved`/`mouse_button_down`，
+  motion → `mouse_moved`，up/cancel → `mouse_button_up`/`mouse_left`；不产生 touch 类型事件。
+- `zwp_tablet_manager_v2` 已实现，映射为 `pen_*`，包括压感、tilt、rotation、按键和橡皮擦。
 - `zwp_relative_pointer_v1` 可提供 raw motion，当前 Event 没有专门字段，可先不支持；
 - `zwp_pointer_constraints_v1` 用于锁定/限制指针，暂可不实现；
 - `zwp_tablet_manager_v2` 对应 `pen_*`，可选；

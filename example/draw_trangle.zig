@@ -103,7 +103,7 @@ pub fn main() !void {
                 .pen_left => |e| std.log.info("pen_left window={d} pen={d}", .{ e.window_id, e.pen_id }),
                 .pen_down => |e| std.log.info("pen_down window={d} pen={d}", .{ e.window_id, e.pen_id }),
                 .pen_up => |e| std.log.info("pen_up window={d} pen={d}", .{ e.window_id, e.pen_id }),
-                .pen_moved => |e| std.log.info("pen_moved window={d} pen={d} pos={d:.2},{d:.2}", .{ e.window_id, e.pen_id, e.x, e.y }),
+                .pen_moved => |e| std.log.info("pen_moved window={d} pen={d} pos={d:.2},{d:.2} pressure={d:.3}", .{ e.window_id, e.pen_id, e.x, e.y , e.pressure}),
                 .pen_button_down => |e| std.log.info("pen_button_down window={d} pen={d} button={d}", .{ e.window_id, e.pen_id, e.button }),
                 .pen_button_up => |e| std.log.info("pen_button_up window={d} pen={d} button={d}", .{ e.window_id, e.pen_id, e.button }),
 

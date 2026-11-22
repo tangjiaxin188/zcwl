@@ -1,4 +1,5 @@
 //! `wl_seat` input handling: pointer, keyboard and touch.
+//! Touchscreen input is mapped to left mouse-button events, not a touch type.
 //!
 //! Keyboard translation uses xkbcommon when available. Key repeat is reported
 //! only when the compositor sends a repeated key event; no client-side timer
@@ -10,6 +11,7 @@ const General = @import("../../General.zig");
 const c = @import("protocols.zig").c;
 const Sink = @import("event.zig").Sink;
 const loader = @import("loader.zig");
+const tablet_mod = @import("tablet.zig");
 const xkb_mod = @import("../xkb.zig");
 
 pub const Input = @This();
@@ -22,6 +24,7 @@ seat: ?*c.struct_wl_seat,
 pointer: ?*c.struct_wl_pointer = null,
 keyboard: ?*c.struct_wl_keyboard = null,
 touch: ?*c.struct_wl_touch = null,
+tablet: ?*tablet_mod.TabletSeat = null,
 
 xkb_context: ?*xkb_mod.Context = null,
 xkb_keymap: ?*xkb_mod.Keymap = null,
@@ -42,11 +45,16 @@ pointer_pos: General.Vector2 = .{ .x = 0, .y = 0 },
 keyboard_window: ?u32 = null,
 repeat_rate: i32 = 0,
 repeat_delay: i32 = 0,
+touch_active_id: ?i32 = null,
+touch_window: ?u32 = null,
+touch_x: f32 = 0,
+touch_y: f32 = 0,
 
 pub fn init(
     alloc: std.mem.Allocator,
     sink: Sink,
     xkb: ?*loader.Xkb,
+    tablet_manager: ?*c.struct_zwp_tablet_manager_v2,
     seat: ?*c.struct_wl_seat,
 ) !*Input {
     const self = try alloc.create(Input);
@@ -62,6 +70,7 @@ pub fn init(
         self.xkb_context = x.contextNew(xkb_mod.CONTEXT_NO_FLAGS);
         if (self.xkb_context == null) return error.XkbContextFailed;
     }
+    self.tablet = try tablet_mod.TabletSeat.init(alloc, tablet_manager, seat, sink);
     if (seat) |s| {
         _ = c.wl_seat_add_listener(s, &seat_listener, self);
     }
@@ -69,6 +78,7 @@ pub fn init(
 }
 
 pub fn uninit(self: *Input) void {
+    if (self.tablet) |value| value.deinit();
     if (self.touch) |v| c.wl_touch_release(v);
     if (self.keyboard) |v| c.wl_keyboard_release(v);
     if (self.pointer) |v| c.wl_pointer_release(v);
@@ -91,6 +101,19 @@ pub fn pointerDevice(self: *Input) ?*c.struct_wl_pointer {
 
 pub fn pointerSerial(self: *Input) u32 {
     return self.pointer_serial;
+}
+
+fn finishTouch(self: *Input) void {
+    if (self.touch_window) |window_id| {
+        self.sink.push(.{ .mouse_button_up = .{
+            .window_id = window_id,
+            .button = .left,
+            .mods = .{},
+        } });
+        self.sink.push(.{ .mouse_left = .{ .window_id = window_id } });
+    }
+    self.touch_active_id = null;
+    self.touch_window = null;
 }
 
 pub fn keyboardFocusWindow(self: *Input) ?u32 {
@@ -126,11 +149,14 @@ fn onCapabilities(data: ?*anyopaque, seat: ?*c.struct_wl_seat, capabilities: u32
     }
 
     if ((capabilities & @as(u32, @intCast(c.WL_SEAT_CAPABILITY_TOUCH))) != 0) {
-        // Touch events are not exposed by Event.Core yet; do not create an
-        // object without a listener.
+        if (self.touch == null) {
+            self.touch = c.wl_seat_get_touch(seat);
+            if (self.touch) |touch| _ = c.wl_touch_add_listener(touch, &touch_listener, self);
+        }
     } else if (self.touch) |touch| {
-        c.wl_touch_release(touch);
+        self.finishTouch();
         self.touch = null;
+        c.wl_touch_release(touch);
     }
 }
 
@@ -514,4 +540,116 @@ fn onPointerWarp(data: ?*anyopaque, pointer: ?*c.struct_wl_pointer, surface_x: c
     _ = pointer;
     _ = surface_x;
     _ = surface_y;
+}
+const touch_listener = c.struct_wl_touch_listener{
+    .down = onTouchDown,
+    .up = onTouchUp,
+    .motion = onTouchMotion,
+    .frame = onTouchFrame,
+    .cancel = onTouchCancel,
+    .shape = onTouchShape,
+    .orientation = onTouchOrientation,
+};
+
+fn onTouchDown(
+    data: ?*anyopaque,
+    touch: ?*c.struct_wl_touch,
+    serial: u32,
+    time: u32,
+    surface: ?*c.struct_wl_surface,
+    id: i32,
+    x: c.wl_fixed_t,
+    y: c.wl_fixed_t,
+) callconv(.c) void {
+    _ = touch;
+    _ = serial;
+    _ = time;
+    const self: *Input = @ptrCast(@alignCast(data orelse return));
+    if (self.touch_active_id != null) return;
+
+    self.touch_active_id = id;
+    self.touch_window = self.sink.windowForSurface(surface);
+    self.touch_x = fixedToFloat(x);
+    self.touch_y = fixedToFloat(y);
+
+    if (self.touch_window) |window_id| {
+        self.sink.push(.{ .mouse_entered = .{ .window_id = window_id } });
+        self.sink.push(.{ .mouse_moved = .{
+            .window_id = window_id,
+            .x = self.touch_x,
+            .y = self.touch_y,
+            .mods = .{},
+        } });
+        self.sink.push(.{ .mouse_button_down = .{
+            .window_id = window_id,
+            .button = .left,
+            .mods = .{},
+            .click_count = 1,
+        } });
+    }
+}
+
+fn onTouchUp(
+    data: ?*anyopaque,
+    touch: ?*c.struct_wl_touch,
+    serial: u32,
+    time: u32,
+    id: i32,
+) callconv(.c) void {
+    _ = touch;
+    _ = serial;
+    _ = time;
+    const self: *Input = @ptrCast(@alignCast(data orelse return));
+    if (self.touch_active_id != id) return;
+    self.finishTouch();
+}
+
+fn onTouchMotion(
+    data: ?*anyopaque,
+    touch: ?*c.struct_wl_touch,
+    time: u32,
+    id: i32,
+    x: c.wl_fixed_t,
+    y: c.wl_fixed_t,
+) callconv(.c) void {
+    _ = touch;
+    _ = time;
+    const self: *Input = @ptrCast(@alignCast(data orelse return));
+    if (self.touch_active_id != id) return;
+    self.touch_x = fixedToFloat(x);
+    self.touch_y = fixedToFloat(y);
+    if (self.touch_window) |window_id| {
+        self.sink.push(.{ .mouse_moved = .{
+            .window_id = window_id,
+            .x = self.touch_x,
+            .y = self.touch_y,
+            .mods = .{},
+        } });
+    }
+}
+
+fn onTouchCancel(data: ?*anyopaque, touch: ?*c.struct_wl_touch) callconv(.c) void {
+    _ = touch;
+    const self: *Input = @ptrCast(@alignCast(data orelse return));
+    self.finishTouch();
+}
+
+fn onTouchFrame(data: ?*anyopaque, touch: ?*c.struct_wl_touch) callconv(.c) void {
+    _ = data;
+    _ = touch;
+}
+
+fn onTouchShape(data: ?*anyopaque, touch: ?*c.struct_wl_touch, id: i32, major: c.wl_fixed_t, minor: c.wl_fixed_t) callconv(.c) void {
+    _ = data;
+    _ = touch;
+    _ = id;
+    _ = major;
+    _ = minor;
+}
+
+fn onTouchOrientation(data: ?*anyopaque, touch: ?*c.struct_wl_touch, id: i32, orientation: c.wl_fixed_t) callconv(.c) void {
+    _ = data;
+    _ = touch;
+    _ = id;
+    _ = orientation;
 }

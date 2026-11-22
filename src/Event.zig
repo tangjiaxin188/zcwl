@@ -42,6 +42,8 @@ pub const MouseButtonDown = struct { window_id: u32, button: MouseButton, mods: 
 pub const MouseButtonUp = struct { window_id: u32, button: MouseButton, mods: Mods };
 pub const MouseScrolled = struct { window_id: u32, dx: f32, dy: f32, mods: Mods };
 
+/// Pen position in logical surface coordinates; `pressure` is 0..1;
+/// `tilt_x`/`tilt_y` and `rotation` are degrees.
 pub const PenState = struct {
     window_id: u32,
     pen_id: u32,

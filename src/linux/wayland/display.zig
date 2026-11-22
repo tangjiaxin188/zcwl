@@ -23,6 +23,7 @@ decoration_manager: ?*c.struct_zxdg_decoration_manager_v1 = null,
 cursor_shape_manager: ?*c.struct_wp_cursor_shape_manager_v1 = null,
 alpha_modifier: ?*c.struct_wp_alpha_modifier_v1 = null,
 text_input_manager: ?*c.struct_zwp_text_input_manager_v3 = null,
+tablet_manager: ?*c.struct_zwp_tablet_manager_v2 = null,
 
 outputs: std.ArrayList(Global) = .empty,
 
@@ -62,6 +63,7 @@ pub fn uninit(self: *Display) void {
     self.outputs.deinit(self.alloc);
 
     if (self.text_input_manager) |v| c.zwp_text_input_manager_v3_destroy(v);
+    if (self.tablet_manager) |v| c.zwp_tablet_manager_v2_destroy(v);
     if (self.alpha_modifier) |v| c.wp_alpha_modifier_v1_destroy(v);
     if (self.cursor_shape_manager) |v| c.wp_cursor_shape_manager_v1_destroy(v);
     if (self.decoration_manager) |v| c.zxdg_decoration_manager_v1_destroy(v);
@@ -168,6 +170,9 @@ fn registryGlobal(
     } else if (std.mem.eql(u8, iface, "zwp_text_input_manager_v3")) {
         if (self.text_input_manager == null)
             self.text_input_manager = bind(c.struct_zwp_text_input_manager_v3, registry, name, &c.zwp_text_input_manager_v3_interface, 1);
+    } else if (std.mem.eql(u8, iface, "zwp_tablet_manager_v2")) {
+        if (self.tablet_manager == null)
+            self.tablet_manager = bind(c.struct_zwp_tablet_manager_v2, registry, name, &c.zwp_tablet_manager_v2_interface, 1);
     } else if (std.mem.eql(u8, iface, "wl_output")) {
         self.outputs.append(self.alloc, .{ .name = name, .version = version }) catch |err| General.reportError(err);
     }

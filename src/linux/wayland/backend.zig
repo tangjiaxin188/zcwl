@@ -78,6 +78,7 @@ pub fn init(alloc: std.mem.Allocator, config: Config.AppConfig) !*Backend {
         alloc,
         self.sink(),
         if (self.loader.xkb) |*xkb| xkb else null,
+        display.tablet_manager,
         display.seat,
     ) catch |err| {
         self.loader.deinit();

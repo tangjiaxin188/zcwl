@@ -12,5 +12,6 @@
 #include "cursor-shape-v1-client.h"
 #include "alpha-modifier-v1-client.h"
 #include "text-input-unstable-v3-client.h"
+#include "tablet-unstable-v2-client.h"
 
 #endif

@@ -1,9 +1,11 @@
 //! `wl_seat` input handling: pointer, keyboard and touch.
 //! Touchscreen input is mapped to left mouse-button events, not a touch type.
 //!
-//! Keyboard translation uses xkbcommon when available. Key repeat is reported
-//! only when the compositor sends a repeated key event; no client-side timer
-//! is installed.
+//! Keyboard translation uses xkbcommon when available. A key event is emitted
+//! for the initial press (`repeat = false`), repeated presses (`repeat = true`)
+//! and the final release (`key_up`). Repetition is detected from the Wayland
+//! `REPEATED` state (keyboard v10+) or from a second press while the key is
+//! still logically down; no client-side repeat timer is installed.
 
 const std = @import("std");
 const Event = @import("../../Event.zig");
@@ -38,6 +40,7 @@ idx_caps: xkb_mod.ModIndex = 0,
 idx_num: xkb_mod.ModIndex = 0,
 
 mods: Event.Mods = .{},
+keys_down: std.bit_set.Static(1024) = .empty,
 last_serial: u32 = 0,
 pointer_serial: u32 = 0,
 pointer_window: ?u32 = null,
@@ -144,6 +147,7 @@ fn onCapabilities(data: ?*anyopaque, seat: ?*c.struct_wl_seat, capabilities: u32
             if (self.keyboard) |keyboard| _ = c.wl_keyboard_add_listener(keyboard, &keyboard_listener, self);
         }
     } else if (self.keyboard) |keyboard| {
+        self.keys_down = .empty;
         c.wl_keyboard_release(keyboard);
         self.keyboard = null;
     }
@@ -390,6 +394,21 @@ fn refreshMods(self: *Input) void {
     };
 }
 
+fn restoreKeysDown(self: *Input, keys: [*c]c.struct_wl_array) void {
+    self.keys_down = .empty;
+    if (keys == null) return;
+    const array = keys[0];
+    if (array.data == null) return;
+    const count = array.size / @sizeOf(u32);
+    const data: [*]const u32 = @ptrCast(@alignCast(array.data.?));
+    for (0..count) |i| {
+        const index = @as(u64, data[i]) + 8;
+        if (index < @TypeOf(self.keys_down).bit_length) {
+            self.keys_down.set(@intCast(index));
+        }
+    }
+}
+
 fn onKeyboardEnter(
     data: ?*anyopaque,
     keyboard: ?*c.struct_wl_keyboard,
@@ -398,8 +417,8 @@ fn onKeyboardEnter(
     keys: [*c]c.struct_wl_array,
 ) callconv(.c) void {
     _ = keyboard;
-    _ = keys;
     const self: *Input = @ptrCast(@alignCast(data orelse return));
+    restoreKeysDown(self, keys);
     self.last_serial = serial;
     self.keyboard_window = self.sink.windowForSurface(surface);
     self.sink.focus(self.keyboard_window);
@@ -418,6 +437,7 @@ fn onKeyboardLeave(
     _ = serial;
     _ = surface;
     const self: *Input = @ptrCast(@alignCast(data orelse return));
+    self.keys_down = .empty;
     if (self.keyboard_window) |window_id| {
         self.sink.push(.{ .window_focus_lost = .{ .window_id = window_id } });
     }
@@ -442,10 +462,13 @@ fn onKeyboardKey(
     const x = self.xkb orelse return;
     const xkb_state = self.xkb_state orelse return;
     const keycode: xkb_mod.Keycode = key + 8;
+    const key_index: usize = @intCast(keycode);
+    const tracked = key_index < @TypeOf(self.keys_down).bit_length;
     const keysym = x.stateKeyGetOneSym(xkb_state, keycode);
     const mapped = xkb_mod.mapKey(keysym);
 
     if (state == @as(u32, @intCast(c.WL_KEYBOARD_KEY_STATE_RELEASED))) {
+        if (tracked) self.keys_down.unset(key_index);
         self.sink.push(.{ .key_up = .{
             .window_id = window_id,
             .key = mapped,
@@ -454,11 +477,14 @@ fn onKeyboardKey(
         return;
     }
 
+    const was_down = tracked and self.keys_down.isSet(key_index);
+    if (tracked) self.keys_down.set(key_index);
+
     self.sink.push(.{ .key_down = .{
         .window_id = window_id,
         .key = mapped,
         .mods = self.mods,
-        .repeat = state == @as(u32, @intCast(c.WL_KEYBOARD_KEY_STATE_REPEATED)),
+        .repeat = state == @as(u32, @intCast(c.WL_KEYBOARD_KEY_STATE_REPEATED)) or was_down,
     } });
 
     var text_buf: [64]u8 = undefined;

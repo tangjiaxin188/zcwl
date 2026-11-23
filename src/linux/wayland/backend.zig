@@ -89,14 +89,19 @@ pub fn init(alloc: std.mem.Allocator, config: Config.AppConfig) !*Backend {
     // pointer/keyboard objects.
     display.roundtrip();
 
-    self.clipboard = Clipboard.init(alloc, display.data_device_manager, display.seat);
+    self.clipboard = Clipboard.init(alloc, self.sink(), display.data_device_manager, display.seat);
     self.clipboard.rebind();
 
     if (display.text_input_manager) |manager| {
         self.ime = Ime.init(manager, display.seat, self.sink());
         if (self.ime) |*ime| ime.rebind();
     }
-    self.cursor = Cursor.init(display.cursor_shape_manager, self.input.pointerDevice());
+    self.cursor = Cursor.init(
+        display.cursor_shape_manager,
+        self.input.pointerDevice(),
+        display.compositor,
+        display.shm,
+    );
 
     for (display.outputs.items) |global| {
         if (Monitor.init(alloc, self, display, global)) |monitor| {
@@ -207,8 +212,32 @@ pub fn setClipboardText(self: *Backend, text: []const u8) !void {
     self.display.flush();
 }
 
-pub fn getClipboardText(self: *Backend, allocator: std.mem.Allocator) ![]u8 {
+pub fn getClipboardText(self: *Backend, allocator: std.mem.Allocator) !?[]u8 {
     return self.clipboard.getText(allocator);
+}
+
+pub fn setClipboardData(self: *Backend, mime: []const u8, data: []const u8) !void {
+    try self.clipboard.setData(mime, data, self.input.lastSerial());
+    self.display.flush();
+}
+
+pub fn setClipboardItems(self: *Backend, items: []const General.ClipboardItem) !void {
+    try self.clipboard.setItems(items, self.input.lastSerial());
+    self.display.flush();
+}
+
+pub fn getClipboardMimeTypes(self: *Backend, allocator: std.mem.Allocator) !?[][]u8 {
+    return self.clipboard.getMimeTypes(allocator);
+}
+
+pub fn getClipboardData(self: *Backend, mime: []const u8, allocator: std.mem.Allocator) !?[]u8 {
+    return self.clipboard.getData(mime, allocator);
+}
+
+pub fn startDragFiles(self: *Backend, window: *WindowImpl, paths: []const []const u8) !void {
+    const serial = self.input.pointerSerial();
+    try self.clipboard.startDragFiles(window.surface, paths, serial);
+    self.display.flush();
 }
 
 fn sink(self: *Backend) Sink {

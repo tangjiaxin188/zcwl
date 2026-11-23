@@ -6,7 +6,7 @@
   <img alt="Zig" src="https://img.shields.io/badge/Zig-0.17.1-F7A41D?logo=zig&logoColor=black">
 </p>
 
-[简体中文](README.md) | [**English**](README_en.md)
+[简体中文](README.md) | [**English**](README_en.md) | [API 中文](api_zh.md) | [API English](api_en.md)
 
 zcwl is a cross-platform library written in Zig—although it is not cross-platform yet. It is inspired by [RGFW](https://github.com/ColleagueRiley/RGFW) and [GLFW](https://github.com/glfw/glfw).
 

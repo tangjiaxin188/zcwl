@@ -211,6 +211,12 @@ pub fn requestAttention(self: *Window) !void {
     return self.backendWindow.requestAttention();
 }
 
+/// Start dragging files out of this window. Paths must be absolute or use
+/// `file://` URIs. Backends without drag support return `error.Unsupported`.
+pub fn startDragFiles(self: *Window, paths: []const []const u8) !void {
+    return self.backendWindow.startDragFiles(paths);
+}
+
 /// Assign a new window title.
 pub fn setTitle(self: *Window, new_title: []const u8) !void {
     try self.backendWindow.setTitle(new_title);
@@ -279,6 +285,16 @@ pub fn setFullscreen(self: *Window, fullscreen: bool) !void {
 /// Set the cursor shape.
 pub fn setCursor(self: *Window, cursor: General.Cursor) !void {
     try self.backendWindow.setCursor(cursor);
+}
+
+/// Configure a custom image for one cursor state.
+pub fn setCursorImage(self: *Window, state: General.Cursor, image: Config.CursorImage) !void {
+    try self.backendWindow.setCursorImage(state, image);
+}
+
+/// Remove a custom image for one cursor state and restore the system shape.
+pub fn clearCursorImage(self: *Window, state: General.Cursor) !void {
+    try self.backendWindow.clearCursorImage(state);
 }
 
 /// Request focus; the platform/compositor may ignore it.

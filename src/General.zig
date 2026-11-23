@@ -5,6 +5,8 @@ pub const Position = struct { x: i32, y: i32 };
 pub const Vector2 = struct { x: f32, y: f32 };
 
 /// Standard cursor shapes; `.arrow` is the default.
+/// Semantic cursor states/shapes. `Window.setCursor` selects the current
+/// state; `Window.setCursorImage` can attach a caller-drawn image to one state.
 pub const Cursor = enum(u8) {
     arrow,
     ibeam,
@@ -20,6 +22,10 @@ pub const Cursor = enum(u8) {
     progress,
     help,
     move,
+    copy,
+    no_drop,
+    grab,
+    grabbing,
 };
 
 /// Graphics API used by a window/context.
@@ -44,6 +50,12 @@ pub const ContextCreator = enum { egl, wgl, cgl, none };
 pub const GlProfile = enum { core, compatibility, es };
 
 pub const Ratio = struct { numerator: u32, denominator: u32 };
+
+/// One clipboard MIME item used when setting multiple representations.
+pub const ClipboardItem = struct {
+    mime: []const u8,
+    data: []const u8,
+};
 
 pub const ContextInfo = struct {
     kind: GraphicsApi,

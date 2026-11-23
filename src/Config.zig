@@ -7,6 +7,16 @@ pub const AppConfig = struct {
     application_id: []const u8 = "",
 };
 
+/// Caller-provided cursor image. `pixels` is row-major RGBA8 with
+/// `width * height * 4` bytes; no row padding.
+pub const CursorImage = struct {
+    pixels: []const u8,
+    width: u32,
+    height: u32,
+    hotspot_x: i32 = 0,
+    hotspot_y: i32 = 0,
+};
+
 /// Window creation parameters.
 pub const WindowConfig = struct {
     /// Graphics API reserved by the window. Using the other path returns

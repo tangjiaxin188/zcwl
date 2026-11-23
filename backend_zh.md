@@ -134,7 +134,11 @@ pub const Backend = struct {
 
     pub fn getMonitors(self: *Backend, allocator: std.mem.Allocator) ![]General.MonitorInfo;
     pub fn setClipboardText(self: *Backend, text: []const u8) !void;
-    pub fn getClipboardText(self: *Backend, allocator: std.mem.Allocator) ![]u8;
+    pub fn getClipboardText(self: *Backend, allocator: std.mem.Allocator) !?[]u8;
+    pub fn setClipboardData(self: *Backend, mime: []const u8, data: []const u8) !void;
+    pub fn setClipboardItems(self: *Backend, items: []const General.ClipboardItem) !void;
+    pub fn getClipboardMimeTypes(self: *Backend, allocator: std.mem.Allocator) !?[][]u8;
+    pub fn getClipboardData(self: *Backend, mime: []const u8, allocator: std.mem.Allocator) !?[]u8;
 };
 ```
 
@@ -149,8 +153,63 @@ pub const Backend = struct {
 | `getVulkanInstanceExtensions` | 返回创建 VkInstance 时需要启用的平台扩展；切片由后端持有。 |
 | `getInfo` | 填 `platform`/`context_creator`/`os`/`arch`；`requested`/`effective` 由 `Backend.zig` 覆盖。 |
 | `getMonitors` | 返回调用方拥有的监视器数组；无监视器返回空数组。 |
-| `setClipboardText` | 设置全局剪贴板文本；不支持时返回 `error.Unsupported`。 |
-| `getClipboardText` | 返回调用方拥有的 UTF-8 文本；不支持时返回 `error.Unsupported`。 |
+| `setClipboardText` | 设置 UTF-8 文本剪贴板；后端选择标准文本 MIME。未初始化返回 `error.Uninitialized`。 |
+| `getClipboardText` | 返回调用方拥有的 UTF-8 文本；空剪贴板/无文本表示返回 `null`。 |
+| `setClipboardData` | 设置一个 MIME + 字节；后端复制数据。未初始化返回 `error.Uninitialized`。 |
+| `setClipboardItems` | 一次设置多个 MIME 表示；未初始化返回 `error.Uninitialized`。 |
+| `getClipboardMimeTypes` | 返回调用方拥有的 MIME 列表；空剪贴板返回 `null`，未初始化返回 `error.Uninitialized`。 |
+| `getClipboardData` | 返回指定 MIME 的调用方字节；空剪贴板返回 `null`，未初始化返回 `error.Uninitialized`，异步未完成返回 `error.WouldBlock`，未提供该 MIME 返回 `error.Unsupported`。 |
+
+剪贴板规则：
+
+- MIME 与数据是原始字节透传；后端不解释图片、文件或 HTML 格式。
+- `text/plain;charset=utf-8`、`text/uri-list` 等只是 MIME 字符串；文件列表由调用方解析。
+- `setClipboardData` / `setClipboardItems` 必须复制 `mime` 和 `data`，不能在调用返回后继续借用。
+- 剪贴板为空返回 `null`；后端没有 clipboard 能力返回 `error.Uninitialized`；不要把“空”错误地报告成 `Unsupported`。
+- 读取可以是异步的：已有缓存返回值；等待传输返回 `error.WouldBlock`；MIME 不存在返回 `error.Unsupported`。
+- `getClipboardText` 是文本便捷接口，底层仍使用同一 MIME/数据规则。
+
+### 文件拖拽 / Drag and Drop
+
+`Window` 新增：
+
+```zig
+pub fn startDragFiles(self: *Window, paths: []const []const u8) !void;
+pub fn setCursorImage(self: *Window, state: General.Cursor, image: Config.CursorImage) !void;
+pub fn clearCursorImage(self: *Window, state: General.Cursor) !void;
+```
+
+- `paths` 必须是绝对路径或 `file://` URI；
+- 后端生成 `text/uri-list`，并提供 `wl_data_source`；
+- 使用最近 pointer serial 发起 `start_drag`；没有有效 serial 返回 `error.WouldBlock`；
+- 无 DnD 支持的后端返回 `error.Unsupported`；
+- 第一版不创建拖拽图标，`icon_surface = null`。
+
+自定义鼠标图案规则：
+
+- `Config.CursorImage` 的 `pixels` 是行优先 RGBA8，`width * height * 4` 字节；
+- `setCursorImage(state, image)` 为指定 `General.Cursor` 状态配置图案，调用方决定内容；
+- 之后 `setCursor(state)` 时优先使用该状态的图案；
+- `clearCursorImage(state)` 删除图案并恢复系统 shape；
+- 库只负责创建 `wl_shm` surface 并调用 `wl_pointer.set_cursor`，不内置 move/文件图案；
+- 没有自定义图案时不会改变 cursor。
+
+新增事件：
+
+```zig
+drag_enter: { window_id, x, y, mimes: []const []const u8 };
+drag_motion: { window_id, x, y };
+drag_leave: { window_id };
+file_drop: { window_id, x, y, uris: []const u8 };
+```
+
+- `drag_enter.mimes` 借用保存，直到下一次 drag 或 backend teardown；
+- `file_drop.uris` 是 `text/uri-list` 原始内容，借用保存到下一次 drop 或 backend teardown；
+- drop 只在用户松手后读取，enter/motion 阶段不读取文件内容；
+- 文件拖拽只传 URI 列表，后端不打开文件、不读取文件内容；
+- `text/uri-list` 每行一个 URI，允许 `#` 注释和 `\r\n`；
+- 拖拽数据采用 copy 语义；move/ask 作为后续增强。
+
 
 附加规则：
 
@@ -288,7 +347,7 @@ pub const Context = struct {
 
 - **分配器**：所有堆分配使用传入的 `std.mem.Allocator`；后端不得使用全局分配器。
 - **切片**：`getTitle`、`MonitorInfo.name`、`ContextInfo` 字符串是借用；其余返回
-  数组（`getMonitors`、`getClipboardText`）由调用方释放。
+  数组（`getMonitors`、`getClipboardMimeTypes`、`getClipboardData`、`getClipboardText`）由调用方释放。
 - **事件**：`pushEvent` 不复制 `TextInput.text`；生产者必须保证切片在下一次 poll
   前有效。`pushEvent` 的线程安全由后端文档声明；不保证时仅主线程调用。
 - **错误**：不支持的功能返回 `error.Unsupported`；上层已拦截的路径返回

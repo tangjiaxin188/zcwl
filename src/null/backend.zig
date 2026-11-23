@@ -119,11 +119,39 @@ pub fn getMonitors(self: *Backend, allocator: std.mem.Allocator) ![]General.Moni
 pub fn setClipboardText(self: *Backend, text: []const u8) !void {
     _ = self;
     _ = text;
+    return error.Uninitialized;
 }
 
-pub fn getClipboardText(self: *Backend, allocator: std.mem.Allocator) ![]u8 {
+pub fn getClipboardText(self: *Backend, allocator: std.mem.Allocator) !?[]u8 {
     _ = self;
-    return allocator.dupe(u8, "");
+    _ = allocator;
+    return error.Uninitialized;
+}
+
+pub fn setClipboardData(self: *Backend, mime: []const u8, data: []const u8) !void {
+    _ = self;
+    _ = mime;
+    _ = data;
+    return error.Uninitialized;
+}
+
+pub fn setClipboardItems(self: *Backend, items: []const General.ClipboardItem) !void {
+    _ = self;
+    _ = items;
+    return error.Uninitialized;
+}
+
+pub fn getClipboardMimeTypes(self: *Backend, allocator: std.mem.Allocator) !?[][]u8 {
+    _ = self;
+    _ = allocator;
+    return error.Uninitialized;
+}
+
+pub fn getClipboardData(self: *Backend, mime: []const u8, allocator: std.mem.Allocator) !?[]u8 {
+    _ = self;
+    _ = mime;
+    _ = allocator;
+    return error.Uninitialized;
 }
 
 pub const Window = struct {
@@ -221,6 +249,19 @@ pub const Window = struct {
         self.cursor = cursor;
     }
 
+    pub fn setCursorImage(self: *Window, state: General.Cursor, image: Config.CursorImage) !void {
+        _ = self;
+        _ = state;
+        _ = image;
+        return error.Unsupported;
+    }
+
+    pub fn clearCursorImage(self: *Window, state: General.Cursor) !void {
+        _ = self;
+        _ = state;
+        return error.Unsupported;
+    }
+
     pub fn setFocus(self: *Window) void {
         self.focused = true;
     }
@@ -289,6 +330,12 @@ pub const Window = struct {
 
     pub fn requestAttention(self: *Window) !void {
         _ = self;
+    }
+
+    pub fn startDragFiles(self: *Window, paths: []const []const u8) !void {
+        _ = self;
+        _ = paths;
+        return error.Unsupported;
     }
 
     pub fn createVulkanSurface(

@@ -1,6 +1,6 @@
 # Wayland Backend Plan / Wayland 后端设计
 
-**状态**: 已实现基础功能（窗口/xdg-shell、EGL、输入、监视器、剪贴板、装饰、
+**状态**: 已实现基础功能（窗口/xdg-shell、EGL、输入、监视器、剪贴板、文件拖拽 DnD、装饰、
 cursor-shape、alpha-modifier、text-input-v3、Vulkan WSI）。后端接口契约见项目根目录
 `backend_zh.md`（English: `backend_en.md`）。协议源码在构建时生成，不提交到仓库。
 
@@ -285,7 +285,7 @@ eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_KHR, wl_display, null)
 | `getVulkanInstanceExtensions` | 静态 `VK_KHR_surface`、`VK_KHR_wayland_surface` | 返回后端持有切片 |
 | `getInfo` | `platform = .wayland`、`context_creator = .egl` | `requested/effective` 由 `Backend.zig` 覆盖 |
 | `getMonitors` | `wl_output` + `xdg_output` | 见 4.5 |
-| `set/getClipboardText` | `wl_data_device_manager` / `wl_data_device` | 见 4.6 |
+| `get/setClipboardText`, MIME clipboard | `wl_data_device_manager` / `wl_data_device` | 见 4.6 |
 
 ### 4.2 Window
 
@@ -305,6 +305,8 @@ eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_KHR, wl_display, null)
 | `setFocus` | `xdg_activation_v1`（可选） | 合成器策略，可能被拒绝 |
 | `requestAttention` | `xdg_activation_v1`（可选） | 无协议时返回 `error.Unsupported` |
 | `setCursor` | `wl_pointer.set_cursor` + `wl_cursor_theme` 或 `wp_cursor_shape_v1` | 需要 pointer enter 的 serial |
+| `setCursorImage` | `setCursorImage(state, image)`：调用方 RGBA → `wl_shm` surface | 按 `General.Cursor` 状态保存；库不内置图案 |
+| `clearCursorImage` | `clearCursorImage(state)` | 删除该状态图案并恢复系统 shape |
 | `setCursorVisible` | `wl_pointer.set_cursor(serial, null, 0, 0)` | 隐藏光标 |
 | `setAspectRatio` | Wayland 无标准 | 记录/返回 no-op |
 | `setImeAllowed` | `zwp_text_input_v3.enable/disable`（可选） | 需要 `zwp_text_input_manager_v3` |
@@ -334,12 +336,14 @@ eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_KHR, wl_display, null)
 
 | Event.Core | Wayland 来源 | 备注 |
 |---|---|---|
-| `key_down/key_up` | `wl_keyboard.key` + xkbcommon | keymap 来自 `wl_keyboard.keymap`；`Mods` 由 xkb state 生成；`repeat` 用 `repeat_info` + timer |
+| `key_down/key_up` | `wl_keyboard.key` + xkbcommon | keymap 来自 `wl_keyboard.keymap`；`Mods` 由 xkb state 生成；`repeat` 来自 v10 `REPEATED` 或按下状态下的重复 press |
 | `text_input` | `zwp_text_input_v3.commit_string` | `text` 借用/需复制到事件生命周期；可选协议 |
 | `mouse_entered/mouse_left` | `wl_pointer.enter/leave` | 记录 serial、surface |
 | `mouse_moved` | `wl_pointer.motion` | 逻辑坐标（wl_fixed） |
 | `mouse_button_*` | `wl_pointer.button` | `click_count` 可由后端统计 |
 | `mouse_scrolled` | `wl_pointer.axis` | `dx/dy`；离散/连续 |
+| `drag_enter/drag_motion/drag_leave` | `wl_data_device.enter/motion/leave` | 文件/URI 拖拽；MIME 列表借用 |
+| `file_drop` | `wl_data_device.drop` + `text/uri-list` | 松手后异步读取原始 URI 列表 |
 | `window_should_close` | `xdg_toplevel.close` | 只发请求，不销毁 |
 | `window_resized` | `xdg_toplevel.configure` + `xdg_surface.configure` | 更新 size；0 表示建议 |
 | `window_scale_changed` | `wl_output.scale` / `wp_fractional_scale_v1.preferred_scale` | 输出 enter/leave 时计算 |
@@ -354,7 +358,8 @@ Wayland 没有全局窗口位置，因此通常不产生 `window_moved`；`getPo
 另外注意：
 
 - `wl_keyboard.keymap` 是 fd + size，需要 `mmap` 后交给 `xkb_keymap_new_from_string`；
-- key repeat 由 `wl_keyboard.repeat_info` 的 rate/delay 驱动，后端维护计时；不要依赖 compositor 重发 key；
+- key repeat 不安装客户端定时器：`wl_seat` 绑定 v10 以接收 `wl_keyboard.key` 的 `REPEATED` 状态；
+  对旧协议或重复发送的 `pressed`，后端用 key-down 集合把已按下 key 的后续 press 标记为 `repeat`；
 - pointer serial 必须保存，用于 `set_cursor`、`set_selection`、drag；
 - `wl_touch` 事件映射为鼠标左键：down → `mouse_entered`/`mouse_moved`/`mouse_button_down`，
   motion → `mouse_moved`，up/cancel → `mouse_button_up`/`mouse_left`；不产生 touch 类型事件。
@@ -376,13 +381,52 @@ Wayland 没有全局窗口位置，因此通常不产生 `window_moved`；`getPo
 ### 4.6 Clipboard / 剪贴板
 
 - `wl_data_device_manager.get_data_device(seat)`；
-- 选择：`wl_data_source.offer("text/plain;charset=utf-8")` + `set_selection(serial)`；
-- 读取：`wl_data_offer.receive("text/plain;charset=utf-8", fd)`，从 pipe 读；
-- 需要键盘焦点/serial；异步事件驱动；
-- `getClipboardText` 若在 `pollEvent` 外部同步等待会破坏事件循环，建议：
-  - 先返回当前缓存（selection 事件时后台读取并缓存），或
-  - 返回 `error.Unsupported`/`error.WouldBlock`，由用户驱动事件循环后再取；
-  - 文档需明确选择。
+- 读取：`data_offer.offer` 给出的所有 MIME 列表；后端为每个 MIME 建立 pipe，
+  `wl_data_offer.accept(mime)` + `receive(mime, fd)`，在 `pollEvent` 中排空并缓存；
+- 发送：`setClipboardItems` 保存多个 MIME + 字节，`wl_data_source.offer` 每个 MIME，
+  `set_selection(serial)`；
+- 需要键盘焦点/serial；异步事件驱动；单个 MIME 读取上限 64 MiB；
+- MIME 和字节原样透传，不解析图片/文件/HTML；
+- 错误规则：
+  - 无 clipboard/未初始化：`error.Uninitialized`；
+  - 剪贴板为空：返回 `null`；
+  - 异步未完成：`error.WouldBlock`；
+  - MIME 未提供：`error.Unsupported`；
+- `getClipboardText` 只是 `text/plain;charset=utf-8`（及 `text/plain`/`UTF8_STRING`
+  别名）的便捷接口，不单独报 `Unsupported`。
+
+#### 4.6.1 File Drag and Drop / 文件拖拽
+
+`wl_data_device` 同时承载 clipboard 和 DnD，因此 `data_offer` 先进入
+`pending` 状态，再由 `selection` 或 `enter` 决定角色：
+
+```text
+data_offer -> pending (收集 MIME)
+selection  -> clipboard offer
+enter      -> drag offer
+```
+
+- 接收：
+  - `enter(serial, surface, x, y, offer)` 记录窗口、坐标、serial、MIME；
+  - 优先接受 `text/uri-list`，调用 `wl_data_offer.accept(serial, mime)`；
+  - `motion` 更新坐标并继续 accept；
+  - `leave` 发送 `drag_leave` 并销毁 drag offer；
+  - `drop` 才创建 pipe 并 `recv("text/uri-list", fd)`；
+  - EOF 后发送 `file_drop`，再 `finish()`/destroy offer；
+  - 事件：`drag_enter`、`drag_motion`、`drag_leave`、`file_drop`。
+- 发送：
+  - `Window.startDragFiles(paths)` 接受绝对路径或 `file://` URI；
+  - 生成 `text/uri-list`（每行一个 URI，CRLF 结尾），创建 `wl_data_source`；
+  - 使用最近 pointer serial 调用
+    `wl_data_device.start_drag(source, origin_surface, null, serial)`；
+  - `send` 回调写入 URI 列表；`cancelled`/`dnd_finished` 清理 source；
+  - 第一版不创建拖拽图标。
+- 数据规则：
+  - 只传 URI，不打开文件、不读文件内容；
+  - `#` 是注释行，解析方需处理 CRLF；
+  - 单次读取上限 64 MiB；
+  - 无有效 pointer serial 返回 `error.WouldBlock`；
+  - copy 语义已实现，move/ask 后续增强。
 
 ### 4.7 透明 / Transparency
 
@@ -399,6 +443,11 @@ Wayland 没有全局窗口位置，因此通常不产生 `window_moved`；`getPo
   - 优先 `wp_cursor_shape_manager_v1`（按 `General.Cursor` 映射 shape）；
   - 否则 `wl_cursor_theme_load(theme, size*scale, shm)` + `wl_cursor_image_get_buffer`；
   - `wl_pointer.set_cursor(serial, cursor_surface, hotspot_x, hotspot_y)`；
+  - 自定义图案：`Window.setCursorImage(state, image)` 按 `General.Cursor` 状态保存
+    调用方 RGBA8 surface；`setCursor(state)` 优先使用该图案；
+  - `clearCursorImage(state)` 恢复系统 shape；
+  - 库只提供 surface/set_cursor 接口，不内置 move/文件图案；
+  - 没有自定义图案时不会改变 cursor；
   - 隐藏：`set_cursor(serial, null, 0, 0)`；
   - 需要 `wl_pointer.enter` 保存的 serial。
 - **Decorations**：
@@ -511,20 +560,21 @@ wayland-scanner private-code \
 - `setAlwaysOnTop`：xdg-shell 没有标准；默认不支持（不引入 layer-shell）。
 - `setAspectRatio`：没有标准；记录/no-op。
 - 装饰：需要 `xdg-decoration` 或自行实现 CSD；CSD 工作量大。
-- 剪贴板读取是异步事件驱动；同步 `getClipboardText` 需要缓存或返回 `WouldBlock`。
+- 剪贴板读取是异步事件驱动；`getClipboardData` 使用缓存，未完成返回 `WouldBlock`。
 - IME、数位笔、相对鼠标、指针锁定都依赖可选协议；缺失时返回 `error.Unsupported` 或忽略。
 - `AppConfig.application_id` 已加入；空值时 Wayland 后端回退为 `"zcwl-app"`。
 - 可选库（EGL / wayland-egl / xkbcommon）通过 `loader.zig` dlopen：先查候选 soname，
   再允许 `ZCWL_EGL_LIB` / `ZCWL_WAYLAND_EGL_LIB` / `ZCWL_XKBCOMMON_LIB` 覆盖；
   缺库时对应功能降级而不是整个后端启动失败。
-- 键盘重复事件由 compositor 的 repeated key 事件上报，后端未安装客户端定时器。
+- 键盘重复：`wl_seat` 绑定 v10 时可收到 `REPEATED`；旧协议下若 compositor 重复发送 `pressed`，
+  后端按 key-down 集合标记 `repeat = true`；未安装客户端 repeat 定时器。
 - Wayland 无法获取窗口位置；`WindowInfo.position` 在 Wayland 下为 null。
 - 透明：默认 alpha 配置；如果合成器/驱动不支持，表现为不透明或黑边，不是错误。
 
 ### 6.2 内存与日志约定
 
 - 后端自身的堆分配全部使用 `Backend.init` 传入的 `std.mem.Allocator`；不使用全局分配器。
-- `getMonitors` / `getClipboardText` 返回调用方拥有的内存；`getTitle`、`MonitorInfo.name`、
+- `getMonitors` / `getClipboardMimeTypes` / `getClipboardData` / `getClipboardText` 返回调用方拥有的内存；`getTitle`、`MonitorInfo.name`、
   `ContextInfo` 字符串是借用，生命周期由拥有者决定。
 - IME/键盘产生的 `TextInput.text` 由后端复制到 `owned_text`，在 `Backend.uninit` 释放；
   事件队列本身不复制借用切片。

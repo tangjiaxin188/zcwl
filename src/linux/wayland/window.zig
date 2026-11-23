@@ -249,6 +249,20 @@ pub fn setCursorVisible(self: *Window, visible: bool) void {
     };
 }
 
+pub fn setCursorImage(self: *Window, state: General.Cursor, image: Config.CursorImage) !void {
+    try self.backend.cursor.setImage(self.backend.input.pointerSerial(), state, image);
+}
+
+pub fn clearCursorImage(self: *Window, state: General.Cursor) !void {
+    try self.backend.cursor.clearImage(self.backend.input.pointerSerial(), state);
+}
+
+/// Start dragging files out of this window. `paths` must be absolute paths or
+/// `file://` URIs. The pointer serial must be current; otherwise WouldBlock.
+pub fn startDragFiles(self: *Window, paths: []const []const u8) !void {
+    return self.backend.startDragFiles(self, paths);
+}
+
 pub fn setAspectRatio(self: *Window, ratio: ?General.Ratio) void {
     self.aspect_ratio = ratio;
 }

@@ -85,12 +85,40 @@ pub fn getMonitors(self: *App, allocator: std.mem.Allocator) ![]General.MonitorI
     return self.backend.getMonitors(allocator);
 }
 
-/// Global clipboard text.
+/// Set clipboard text. The backend chooses its standard UTF-8 text MIME.
 pub fn setClipboardText(self: *App, text: []const u8) !void {
     return self.backend.setClipboardText(text);
 }
 
-/// Caller owns the returned text.
-pub fn getClipboardText(self: *App, allocator: std.mem.Allocator) ![]u8 {
+/// Clipboard text. Returns null when empty or no text representation.
+/// `error.Uninitialized` means the backend has no clipboard support.
+pub fn getClipboardText(self: *App, allocator: std.mem.Allocator) !?[]u8 {
     return self.backend.getClipboardText(allocator);
+}
+
+/// MIME types currently offered. Returns null when the clipboard is empty.
+/// Each string and the outer slice are caller-owned.
+pub fn getClipboardMimeTypes(self: *App, allocator: std.mem.Allocator) !?[][]u8 {
+    return self.backend.getClipboardMimeTypes(allocator);
+}
+
+/// Read one MIME representation. Returns null when the clipboard is empty.
+/// `error.WouldBlock` means the async transfer is still in progress;
+/// `error.Unsupported` means this MIME type is not offered.
+pub fn getClipboardData(
+    self: *App,
+    mime: []const u8,
+    allocator: std.mem.Allocator,
+) !?[]u8 {
+    return self.backend.getClipboardData(mime, allocator);
+}
+
+/// Set one MIME representation. The backend copies `mime` and `data`.
+pub fn setClipboardData(self: *App, mime: []const u8, data: []const u8) !void {
+    return self.backend.setClipboardData(mime, data);
+}
+
+/// Set multiple MIME representations at once.
+pub fn setClipboardItems(self: *App, items: []const General.ClipboardItem) !void {
+    return self.backend.setClipboardItems(items);
 }

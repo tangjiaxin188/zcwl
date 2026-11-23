@@ -18,6 +18,7 @@ compositor: ?*c.struct_wl_compositor = null,
 seat: ?*c.struct_wl_seat = null,
 wm_base: ?*c.struct_xdg_wm_base = null,
 data_device_manager: ?*c.struct_wl_data_device_manager = null,
+shm: ?*c.struct_wl_shm = null,
 
 decoration_manager: ?*c.struct_zxdg_decoration_manager_v1 = null,
 cursor_shape_manager: ?*c.struct_wp_cursor_shape_manager_v1 = null,
@@ -67,6 +68,8 @@ pub fn uninit(self: *Display) void {
     if (self.alpha_modifier) |v| c.wp_alpha_modifier_v1_destroy(v);
     if (self.cursor_shape_manager) |v| c.wp_cursor_shape_manager_v1_destroy(v);
     if (self.decoration_manager) |v| c.zxdg_decoration_manager_v1_destroy(v);
+    if (self.shm) |v| c.wl_shm_destroy(v);
+
     if (self.data_device_manager) |v| c.wl_data_device_manager_destroy(v);
     if (self.wm_base) |v| c.xdg_wm_base_destroy(v);
     if (self.seat) |v| c.wl_seat_release(v);
@@ -149,7 +152,7 @@ fn registryGlobal(
             self.compositor = bind(c.struct_wl_compositor, registry, name, &c.wl_compositor_interface, @min(version, 4));
     } else if (std.mem.eql(u8, iface, "wl_seat")) {
         if (self.seat == null)
-            self.seat = bind(c.struct_wl_seat, registry, name, &c.wl_seat_interface, @min(version, 7));
+            self.seat = bind(c.struct_wl_seat, registry, name, &c.wl_seat_interface, @min(version, 10));
     } else if (std.mem.eql(u8, iface, "xdg_wm_base")) {
         if (self.wm_base == null) {
             self.wm_base = bind(c.struct_xdg_wm_base, registry, name, &c.xdg_wm_base_interface, @min(version, 5));
@@ -158,6 +161,9 @@ fn registryGlobal(
     } else if (std.mem.eql(u8, iface, "wl_data_device_manager")) {
         if (self.data_device_manager == null)
             self.data_device_manager = bind(c.struct_wl_data_device_manager, registry, name, &c.wl_data_device_manager_interface, @min(version, 3));
+    } else if (std.mem.eql(u8, iface, "wl_shm")) {
+        if (self.shm == null)
+            self.shm = bind(c.struct_wl_shm, registry, name, &c.wl_shm_interface, 1);
     } else if (std.mem.eql(u8, iface, "zxdg_decoration_manager_v1")) {
         if (self.decoration_manager == null)
             self.decoration_manager = bind(c.struct_zxdg_decoration_manager_v1, registry, name, &c.zxdg_decoration_manager_v1_interface, 1);

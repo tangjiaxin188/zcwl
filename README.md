@@ -6,7 +6,7 @@
   <img alt="Zig" src="https://img.shields.io/badge/Zig-0.17.1-F7A41D?logo=zig&logoColor=black">
 </p>
 
-[**简体中文**](README.md) | [English](README_en.md)
+[**简体中文**](README.md) | [English](README_en.md) | [API 中文](api_zh.md) | [API English](api_en.md)
 
 zcwl 是一个用 Zig 编写的跨平台库——尽管目前它还不跨平台。灵感来自 [RGFW](https://github.com/ColleagueRiley/RGFW) 和 [GLFW](https://github.com/glfw/glfw)。
 

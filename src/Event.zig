@@ -30,6 +30,8 @@ pub const WindowResized = struct { window_id: u32, width: u32, height: u32 };
 pub const WindowMoved = struct { window_id: u32, x: i32, y: i32 };
 /// Logical-to-physical scale changed; recreate drawable/viewport.
 pub const WindowScaleChanged = struct { window_id: u32, scale: f32 };
+/// Keyboard press. `repeat = false` is the initial single press,
+/// `repeat = true` is a long-press repeat; the release is `KeyUp`.
 pub const KeyDown = struct { window_id: u32, key: KeyCode, mods: Mods, repeat: bool };
 pub const KeyUp = struct { window_id: u32, key: KeyCode, mods: Mods };
 
@@ -69,6 +71,34 @@ pub const PenButton = struct {
     tilt_y: f64,
     rotation: f64,
     eraser: bool,
+};
+
+/// File/list drag entering a window. `mimes` is borrowed and remains valid
+/// until the next drag begins or the backend is torn down.
+pub const DragEnter = struct {
+    window_id: u32,
+    x: f32,
+    y: f32,
+    mimes: []const []const u8,
+};
+
+pub const DragMotion = struct {
+    window_id: u32,
+    x: f32,
+    y: f32,
+};
+
+pub const DragLeave = struct {
+    window_id: u32,
+};
+
+/// A dropped `text/uri-list` payload. `uris` is borrowed and remains valid
+/// until the next file drop or backend teardown.
+pub const FileDrop = struct {
+    window_id: u32,
+    x: f32,
+    y: f32,
+    uris: []const u8,
 };
 
 pub const CustomType = struct {
@@ -120,6 +150,11 @@ const CoreEvent = union(enum) {
     pen_moved: PenState,
     pen_button_down: PenButton,
     pen_button_up: PenButton,
+
+    drag_enter: DragEnter,
+    drag_motion: DragMotion,
+    drag_leave: DragLeave,
+    file_drop: FileDrop,
 
     custom: CustomType,
     unknown,

@@ -141,7 +141,11 @@ pub const Backend = struct {
 
     pub fn getMonitors(self: *Backend, allocator: std.mem.Allocator) ![]General.MonitorInfo;
     pub fn setClipboardText(self: *Backend, text: []const u8) !void;
-    pub fn getClipboardText(self: *Backend, allocator: std.mem.Allocator) ![]u8;
+    pub fn getClipboardText(self: *Backend, allocator: std.mem.Allocator) !?[]u8;
+    pub fn setClipboardData(self: *Backend, mime: []const u8, data: []const u8) !void;
+    pub fn setClipboardItems(self: *Backend, items: []const General.ClipboardItem) !void;
+    pub fn getClipboardMimeTypes(self: *Backend, allocator: std.mem.Allocator) !?[][]u8;
+    pub fn getClipboardData(self: *Backend, mime: []const u8, allocator: std.mem.Allocator) !?[]u8;
 };
 ```
 
@@ -156,8 +160,63 @@ pub const Backend = struct {
 | `getVulkanInstanceExtensions` | Return the platform instance extensions required for surface creation; the backend owns the slice. |
 | `getInfo` | Fill `platform`/`context_creator`/`os`/`arch`; `requested`/`effective` are overwritten by `Backend.zig`. |
 | `getMonitors` | Return a caller-owned monitor array; return an empty array if none. |
-| `setClipboardText` | Set global clipboard text; return `error.Unsupported` when unavailable. |
-| `getClipboardText` | Return caller-owned UTF-8 text; return `error.Unsupported` when unavailable. |
+| `setClipboardText` | Set UTF-8 clipboard text; the backend chooses the standard text MIME. Return `error.Uninitialized` when unavailable. |
+| `getClipboardText` | Return caller-owned UTF-8 text; return `null` for an empty clipboard/no text representation. |
+| `setClipboardData` | Set one MIME + byte payload; the backend copies both. Return `error.Uninitialized` when unavailable. |
+| `setClipboardItems` | Set multiple MIME representations; return `error.Uninitialized` when unavailable. |
+| `getClipboardMimeTypes` | Return a caller-owned MIME list; return `null` when empty; `error.Uninitialized` when unavailable. |
+| `getClipboardData` | Return caller-owned bytes for a MIME; `null` when empty, `error.Uninitialized` when unavailable, `error.WouldBlock` while async transfer is pending, `error.Unsupported` when the MIME is not offered. |
+
+Clipboard rules:
+
+- MIME and data are opaque bytes; the backend must not interpret images, files or HTML.
+- `text/plain;charset=utf-8`, `text/uri-list`, etc. are just MIME strings; file lists are parsed by the caller.
+- `setClipboardData` / `setClipboardItems` must copy `mime` and `data`; the caller may reuse them immediately.
+- Empty clipboard returns `null`; a backend without clipboard support returns `error.Uninitialized`; do not report “empty” as `Unsupported`.
+- Reads may be asynchronous: return cached data when available, `error.WouldBlock` while pending, and `error.Unsupported` when the MIME is not offered.
+- `getClipboardText` is only a text convenience wrapper over the same MIME/data rules.
+
+### File drag and drop
+
+`Window` adds:
+
+```zig
+pub fn startDragFiles(self: *Window, paths: []const []const u8) !void;
+pub fn setCursorImage(self: *Window, state: General.Cursor, image: Config.CursorImage) !void;
+pub fn clearCursorImage(self: *Window, state: General.Cursor) !void;
+```
+
+- `paths` must be absolute paths or `file://` URIs;
+- the backend builds a `text/uri-list` and a `wl_data_source`;
+- `start_drag` uses the latest pointer serial; no valid serial → `error.WouldBlock`;
+- backends without DnD return `error.Unsupported`;
+- the first version uses `icon_surface = null`.
+
+Custom cursor rules:
+
+- `Config.CursorImage.pixels` is row-major RGBA8 with `width * height * 4` bytes;
+- `setCursorImage(state, image)` configures an image for one `General.Cursor` state;
+- `setCursor(state)` prefers that state's image when present;
+- `clearCursorImage(state)` removes it and restores the system shape;
+- the library only creates the `wl_shm` surface and calls `wl_pointer.set_cursor`; no built-in move/file pattern;
+- no custom image means no cursor change.
+
+New events:
+
+```zig
+drag_enter: { window_id, x, y, mimes: []const []const u8 };
+drag_motion: { window_id, x, y };
+drag_leave: { window_id };
+file_drop: { window_id, x, y, uris: []const u8 };
+```
+
+- `drag_enter.mimes` is borrowed until the next drag or backend teardown;
+- `file_drop.uris` is the raw `text/uri-list`, borrowed until the next drop or teardown;
+- data is read only on drop, never during enter/motion;
+- only URIs are transferred; the backend never opens files;
+- each URI line may contain CRLF and `#` comments;
+- copy semantics are implemented; move/ask are future enhancements.
+
 
 Additional rules:
 
@@ -301,7 +360,8 @@ mechanism (EGL/WGL/CGL); a different display/backend returns
 - **Allocator**: All heap allocations use the provided `std.mem.Allocator`; no
   global allocator.
 - **Slices**: `getTitle`, `MonitorInfo.name`, `ContextInfo` strings are
-  borrowed; arrays returned by `getMonitors`/`getClipboardText` are
+  borrowed; arrays returned by `getMonitors`/`getClipboardMimeTypes`/
+  `getClipboardData`/`getClipboardText` are
   caller-owned.
 - **Events**: `pushEvent` does not copy `TextInput.text`; the producer keeps it
   valid until polled. Thread-safety of `pushEvent` is backend-defined;

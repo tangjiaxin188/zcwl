@@ -23,6 +23,10 @@ test "public API surface" {
         _ = zcwl.Context;
         _ = zcwl.Event;
         _ = zcwl.Event.Core;
+        _ = zcwl.Event.DragEnter;
+        _ = zcwl.Event.DragMotion;
+        _ = zcwl.Event.DragLeave;
+        _ = zcwl.Event.FileDrop;
         _ = zcwl.General;
         _ = zcwl.Vulkan;
         _ = zcwl.Config;
@@ -37,6 +41,10 @@ test "public API surface" {
         _ = zcwl.App.getMonitors;
         _ = zcwl.App.setClipboardText;
         _ = zcwl.App.getClipboardText;
+        _ = zcwl.App.getClipboardMimeTypes;
+        _ = zcwl.App.getClipboardData;
+        _ = zcwl.App.setClipboardData;
+        _ = zcwl.App.setClipboardItems;
 
         // Window (createContext is generic: exercised in the callable test).
         _ = zcwl.Window.destroy;
@@ -79,8 +87,11 @@ test "public API surface" {
         _ = zcwl.Window.setAlwaysOnTop;
         _ = zcwl.Window.setOpacity;
         _ = zcwl.Window.setCursorVisible;
+        _ = zcwl.Window.setCursorImage;
+        _ = zcwl.Window.clearCursorImage;
         _ = zcwl.Window.setAspectRatio;
         _ = zcwl.Window.requestAttention;
+        _ = zcwl.Window.startDragFiles;
 
         // Context
         _ = zcwl.Context.getKind;
@@ -110,6 +121,8 @@ test "public API surface" {
         _ = General.ContextInfo;
         _ = General.WindowInfo;
         _ = General.MonitorInfo;
+        _ = General.ClipboardItem;
+        _ = zcwl.Config.CursorImage;
         _ = @TypeOf(General.error_reporter);
         _ = @TypeOf(General.info_reporter);
     }
@@ -148,10 +161,24 @@ test "backend memory ownership" {
         _ = monitor.name;
     }
 
-    if (app.getClipboardText(std.testing.allocator)) |text| {
-        defer std.testing.allocator.free(text);
+    if (app.getClipboardText(std.testing.allocator)) |maybe_text| {
+        if (maybe_text) |text| std.testing.allocator.free(text);
     } else |_| {}
     app.setClipboardText("memory") catch {};
+
+    if (app.getClipboardMimeTypes(std.testing.allocator)) |maybe_mimes| {
+        if (maybe_mimes) |mimes| {
+            for (mimes) |mime| std.testing.allocator.free(mime);
+            std.testing.allocator.free(mimes);
+        }
+    } else |_| {}
+    if (app.getClipboardData("text/plain", std.testing.allocator) catch null) |data| {
+        std.testing.allocator.free(data);
+    }
+    app.setClipboardData("text/plain", "memory") catch {};
+    app.setClipboardItems(&[_]General.ClipboardItem{
+        .{ .mime = "text/plain", .data = "memory" },
+    }) catch {};
 
     // Context is optional (backend may lack EGL), so only its lifecycle is
     // checked when creation succeeds.
@@ -265,6 +292,14 @@ test "public API is callable" {
     win.setCursorVisible(true);
     win.setAspectRatio(null);
     win.requestAttention() catch {};
+    win.startDragFiles(&.{}) catch {};
+    var cursor_pixel = [_]u8{ 0, 0, 0, 0 };
+    win.setCursorImage(.arrow, .{
+        .pixels = &cursor_pixel,
+        .width = 1,
+        .height = 1,
+    }) catch {};
+    win.clearCursorImage(.arrow) catch {};
     _ = win.getNative();
     _ = win.getTitle();
     win.setTitle("api") catch {};

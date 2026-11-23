@@ -7,9 +7,15 @@ const gl = @import("opengl.zig");
 
 const allocator = std.heap.page_allocator;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     zcwl.General.error_reporter = reportError;
     zcwl.General.info_reporter = reportInfo;
+
+    var args = try std.process.Args.iterateAllocator(init.minimal.args, allocator);
+    defer args.deinit();
+    const argv0 = args.next() orelse return error.MissingExecutablePath;
+    const self_path = try executablePath(allocator, init.io, argv0);
+    defer allocator.free(self_path);
 
     const app = try zcwl.App.init(allocator, .{
         .application_id = "org.zcwl.example.triangle",
@@ -52,6 +58,9 @@ pub fn main() !void {
     });
 
     var running = true;
+    var mouse_x: f32 = 0;
+    var mouse_y: f32 = 0;
+    var dragging_self = false;
     var event: zcwl.Event.Core = .none;
     while (running) {
         while (app.pollEvent(&event)) {
@@ -76,10 +85,15 @@ pub fn main() !void {
                 .window_maximized => |e| std.log.info("window_maximized window={d}", .{e.window_id}),
                 .window_restored => |e| std.log.info("window_restored window={d}", .{e.window_id}),
 
-                .key_down => |e| std.log.info(
-                    "key_down window={d} key={s} repeat={} mods(shift={} ctrl={} alt={} super={})",
-                    .{ e.window_id, @tagName(e.key), e.repeat, e.mods.shift, e.mods.control, e.mods.alt, e.mods.super },
-                ),
+                .key_down => |e| {
+                    std.log.info(
+                        "key_down window={d} key={s} repeat={} mods(shift={} ctrl={} alt={} super={})",
+                        .{ e.window_id, @tagName(e.key), e.repeat, e.mods.shift, e.mods.control, e.mods.alt, e.mods.super },
+                    );
+                    if (e.key == zcwl.Event.KeyCode.v and e.mods.control and !e.repeat) {
+                        logClipboard(app);
+                    }
+                },
                 .key_up => |e| std.log.info(
                     "key_up window={d} key={s} mods(shift={} ctrl={} alt={} super={})",
                     .{ e.window_id, @tagName(e.key), e.mods.shift, e.mods.control, e.mods.alt, e.mods.super },
@@ -88,24 +102,76 @@ pub fn main() !void {
 
                 .mouse_entered => |e| std.log.info("mouse_entered window={d}", .{e.window_id}),
                 .mouse_left => |e| std.log.info("mouse_left window={d}", .{e.window_id}),
-                .mouse_moved => |e| std.log.info("mouse_moved window={d} pos={d:.2},{d:.2}", .{ e.window_id, e.x, e.y }),
-                .mouse_button_down => |e| std.log.info(
-                    "mouse_button_down window={d} button={s} clicks={d}",
-                    .{ e.window_id, @tagName(e.button), e.click_count },
-                ),
-                .mouse_button_up => |e| std.log.info(
-                    "mouse_button_up window={d} button={s}",
-                    .{ e.window_id, @tagName(e.button) },
-                ),
+                .mouse_moved => |e| {
+                    mouse_x = e.x;
+                    mouse_y = e.y;
+                    std.log.info("mouse_moved window={d} pos={d:.2},{d:.2}", .{ e.window_id, e.x, e.y });
+                },
+                .mouse_button_down => |e| {
+                    std.log.info(
+                        "mouse_button_down window={d} button={s} clicks={d}",
+                        .{ e.window_id, @tagName(e.button), e.click_count },
+                    );
+                    if (e.button == .left and pointInTriangle(mouse_x, mouse_y, window.getSize())) {
+                        std.log.info("dragging executable: {s}", .{self_path});
+                        dragging_self = true;
+                        setDragCursor(window, true);
+                        window.startDragFiles(&.{self_path}) catch |err| {
+                            dragging_self = false;
+                            setDragCursor(window, false);
+                            std.log.warn("startDragFiles failed: {s}", .{@errorName(err)});
+                        };
+                        if (dragging_self) setDragCursor(window, true);
+                    }
+                },
+                .mouse_button_up => |e| {
+                    std.log.info(
+                        "mouse_button_up window={d} button={s}",
+                        .{ e.window_id, @tagName(e.button) },
+                    );
+                    if (dragging_self) {
+                        dragging_self = false;
+                        setDragCursor(window, false);
+                    }
+                },
                 .mouse_scrolled => |e| std.log.info("mouse_scrolled window={d} dx={d:.2} dy={d:.2}", .{ e.window_id, e.dx, e.dy }),
 
                 .pen_entered => |e| std.log.info("pen_entered window={d} pen={d}", .{ e.window_id, e.pen_id }),
                 .pen_left => |e| std.log.info("pen_left window={d} pen={d}", .{ e.window_id, e.pen_id }),
                 .pen_down => |e| std.log.info("pen_down window={d} pen={d}", .{ e.window_id, e.pen_id }),
                 .pen_up => |e| std.log.info("pen_up window={d} pen={d}", .{ e.window_id, e.pen_id }),
-                .pen_moved => |e| std.log.info("pen_moved window={d} pen={d} pos={d:.2},{d:.2} pressure={d:.3}", .{ e.window_id, e.pen_id, e.x, e.y , e.pressure}),
+                .pen_moved => |e| std.log.info("pen_moved window={d} pen={d} pos={d:.2},{d:.2} pressure={d:.3}", .{ e.window_id, e.pen_id, e.x, e.y, e.pressure }),
                 .pen_button_down => |e| std.log.info("pen_button_down window={d} pen={d} button={d}", .{ e.window_id, e.pen_id, e.button }),
                 .pen_button_up => |e| std.log.info("pen_button_up window={d} pen={d} button={d}", .{ e.window_id, e.pen_id, e.button }),
+
+                .drag_enter => |e| {
+                    std.log.info(
+                        "drag_enter window={d} pos={d:.2},{d:.2} mimes={d}",
+                        .{ e.window_id, e.x, e.y, e.mimes.len },
+                    );
+                    if (dragging_self) setDragCursor(window, true);
+                },
+                .drag_motion => |e| std.log.info(
+                    "drag_motion window={d} pos={d:.2},{d:.2}",
+                    .{ e.window_id, e.x, e.y },
+                ),
+                .drag_leave => |e| {
+                    std.log.info("drag_leave window={d}", .{e.window_id});
+                    if (dragging_self) {
+                        dragging_self = false;
+                        setDragCursor(window, false);
+                    }
+                },
+                .file_drop => |e| {
+                    std.log.info(
+                        "file_drop window={d} pos={d:.2},{d:.2} uris='{s}'",
+                        .{ e.window_id, e.x, e.y, e.uris },
+                    );
+                    if (dragging_self) {
+                        dragging_self = false;
+                        setDragCursor(window, false);
+                    }
+                },
 
                 .custom => |e| std.log.info("custom window={d} type={d}", .{ e.window_id, e.ev_type }),
                 .unknown => std.log.info("unknown event", .{}),
@@ -303,3 +369,116 @@ pub const Renderer = struct {
         std.log.err("program link failed: {s}", .{buf[0..@intCast(len)]});
     }
 };
+
+fn executablePath(alloc: std.mem.Allocator, io: std.Io, argv0: []const u8) ![]u8 {
+    if (std.fs.path.isAbsolute(argv0)) return alloc.dupe(u8, argv0);
+    const cwd = try std.process.currentPathAlloc(io, alloc);
+    defer alloc.free(cwd);
+    return std.fs.path.resolveAlloc(alloc, &.{ cwd, argv0 });
+}
+
+fn setDragCursor(window: *zcwl.Window, active: bool) void {
+    if (active) {
+        window.setCursor(.grabbing) catch |err| {
+            std.log.warn("set grabbing cursor failed: {s}", .{@errorName(err)});
+        };
+    } else {
+        window.setCursor(.arrow) catch |err| {
+            std.log.warn("restore cursor failed: {s}", .{@errorName(err)});
+        };
+    }
+}
+
+fn triangleEdge(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) f32 {
+    return (px - ax) * (by - ay) - (py - ay) * (bx - ax);
+}
+
+fn pointInTriangle(x: f32, y: f32, size: zcwl.General.Size) bool {
+    if (size.w == 0 or size.h == 0) return false;
+    const px = (x / @as(f32, @floatFromInt(size.w))) * 2.0 - 1.0;
+    const py = 1.0 - (y / @as(f32, @floatFromInt(size.h))) * 2.0;
+
+    const ax: f32 = -0.6;
+    const ay: f32 = -0.5;
+    const bx: f32 = 0.6;
+    const by: f32 = -0.5;
+    const cx: f32 = 0.0;
+    const cy: f32 = 0.6;
+
+    const d1 = triangleEdge(ax, ay, bx, by, px, py);
+    const d2 = triangleEdge(bx, by, cx, cy, px, py);
+    const d3 = triangleEdge(cx, cy, ax, ay, px, py);
+
+    const has_neg = d1 < 0 or d2 < 0 or d3 < 0;
+    const has_pos = d1 > 0 or d2 > 0 or d3 > 0;
+    return !(has_neg and has_pos);
+}
+
+fn freeMimeList(mimes: [][]u8) void {
+    for (mimes) |mime| allocator.free(mime);
+    allocator.free(mimes);
+}
+
+fn joinMimes(mimes: []const []u8, alloc: std.mem.Allocator) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    for (mimes, 0..) |mime, i| {
+        if (i != 0) try out.appendSlice(alloc, ", ");
+        try out.appendSlice(alloc, mime);
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+fn logClipboard(app: *zcwl.App) void {
+    const mimes_opt = app.getClipboardMimeTypes(allocator) catch |err| {
+        std.log.warn("clipboard unavailable: {s}", .{@errorName(err)});
+        return;
+    };
+    const mimes = mimes_opt orelse {
+        std.log.info("clipboard is empty", .{});
+        return;
+    };
+    defer freeMimeList(mimes);
+
+    // One paste = one line. The clipboard often advertises several aliases for
+    // the same payload; join all aliases into one array-like list and show the
+    // first readable representation's metadata.
+    const joined = joinMimes(mimes, allocator) catch |err| {
+        std.log.warn("clipboard mime list unavailable: {s}", .{@errorName(err)});
+        return;
+    };
+    defer allocator.free(joined);
+
+    var selected_mime: ?[]const u8 = null;
+    var selected_data: ?[]u8 = null;
+    var last_error: ?anyerror = null;
+    for (mimes) |mime| {
+        const data_opt = app.getClipboardData(mime, allocator) catch |err| {
+            last_error = err;
+            continue;
+        };
+        if (data_opt) |data| {
+            selected_mime = mime;
+            selected_data = data;
+            break;
+        }
+    }
+    defer {
+        if (selected_data) |data| allocator.free(data);
+    }
+
+    if (selected_mime) |mime| {
+        const data = selected_data orelse return;
+        const prefix_len: usize = if (data.len < 4) data.len else 4;
+        const prefix = data[0..prefix_len];
+
+        std.log.info(
+            "clipboard mimes=[{s}] data_mime={s} bytes={d} first4={s}",
+            .{ joined, mime, data.len, prefix },
+        );
+    } else if (last_error) |err| {
+        std.log.warn("clipboard mimes=[{s}] error={s}", .{ joined, @errorName(err) });
+    } else {
+        std.log.info("clipboard mimes=[{s}] no readable data", .{joined});
+    }
+}

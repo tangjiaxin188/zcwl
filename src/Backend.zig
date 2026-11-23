@@ -88,6 +88,22 @@ pub fn setClipboardText(self: *Handle, text: []const u8) !void {
     return impl.setClipboardText(self, text);
 }
 
-pub fn getClipboardText(self: *Handle, allocator: std.mem.Allocator) ![]u8 {
+pub fn getClipboardText(self: *Handle, allocator: std.mem.Allocator) !?[]u8 {
     return impl.getClipboardText(self, allocator);
+}
+
+pub fn getClipboardMimeTypes(self: *Handle, allocator: std.mem.Allocator) !?[][]u8 {
+    return impl.getClipboardMimeTypes(self, allocator);
+}
+
+pub fn getClipboardData(self: *Handle, mime: []const u8, allocator: std.mem.Allocator) !?[]u8 {
+    return impl.getClipboardData(self, mime, allocator);
+}
+
+pub fn setClipboardData(self: *Handle, mime: []const u8, data: []const u8) !void {
+    return impl.setClipboardData(self, mime, data);
+}
+
+pub fn setClipboardItems(self: *Handle, items: []const General.ClipboardItem) !void {
+    return impl.setClipboardItems(self, items);
 }

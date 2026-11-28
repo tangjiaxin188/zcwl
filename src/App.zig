@@ -11,36 +11,68 @@ const Config = @import("Config.zig");
 
 _alloc: std.mem.Allocator,
 _wtable: std.AutoHashMapUnmanaged(u32, *Window),
+/// Every `Window` struct ever allocated by this App. `Window.uninit()` keeps
+/// the small struct alive until `App.uninit()` so repeated teardown is safe.
+_windows: std.ArrayListUnmanaged(*Window) = .empty,
 backend: *Backend.Handle, // backend do anythings
+reporter: General.Reporter,
 
 /// Create an App. All library allocations use `alloc`.
+/// Unimplemented backends are rejected by build.zig, so
+/// `error.BackendUnavailable` is a defensive guard for a future runtime
+/// fallback and is not reachable with the current build-time selection.
 pub fn init(alloc: std.mem.Allocator, config: Config.AppConfig) !*App {
     const back = try Backend.init(alloc, config);
-    const app = alloc.create(App) catch |err| {
-        back.uninit();
-        return err;
-    };
+    errdefer back.uninit();
+
+    const info = Backend.getInfo(back);
+    if (info.requested != info.effective) return error.BackendUnavailable;
+
+    const app = try alloc.create(App);
+    errdefer alloc.destroy(app);
     app.* = App{
         ._alloc = alloc,
         .backend = back,
         ._wtable = .empty,
+        ._windows = .empty,
+        .reporter = config.reporter,
     };
     return app;
 }
 
+/// Destroy the backend and all live windows, then free every `Window` struct
+/// this App ever allocated. All `Window`/`Context` pointers become invalid.
 pub fn uninit(self: *App) void {
-    var it = self._wtable.valueIterator();
-    while (it.next()) |w| w.*.uninit();
+    // `Window.uninit()` deregisters itself, so take an entry out of the table
+    // before calling it instead of iterating while mutating.
+    while (self._wtable.count() != 0) {
+        var it = self._wtable.iterator();
+        const entry = it.next().?;
+        const id = entry.key_ptr.*;
+        const w = entry.value_ptr.*;
+        _ = self._wtable.remove(id);
+        w.uninit();
+    }
     self._wtable.deinit(self._alloc);
     self.backend.uninit();
+    for (self._windows.items) |w| self._alloc.destroy(w);
+    self._windows.deinit(self._alloc);
     self._alloc.destroy(self);
 }
 
 /// config : WindowConfig
 pub fn createWindow(self: *App, config: Config.WindowConfig) !*Window {
+    if (config.size.w == 0 or config.size.h == 0) return error.InvalidSize;
+    if (config.size.w > std.math.maxInt(i32) or config.size.h > std.math.maxInt(i32)) return error.InvalidSize;
+
     const client_api = config.client_api;
     const bw = try self.backend.initWindow(config);
     const cw = try Window.init(self, bw, client_api);
+    self._windows.append(self._alloc, cw) catch |err| {
+        self._alloc.destroy(cw);
+        bw.uninit();
+        return err;
+    };
     self._wtable.put(self._alloc, cw.id, cw) catch |err| {
         cw.uninit();
         return err;
@@ -96,13 +128,15 @@ pub fn getClipboardText(self: *App, allocator: std.mem.Allocator) !?[]u8 {
     return self.backend.getClipboardText(allocator);
 }
 
-/// MIME types currently offered. Returns null when the clipboard is empty.
+/// MIME types currently offered. Returns null when the clipboard is empty;
+/// `error.Uninitialized` when the backend has no clipboard support.
 /// Each string and the outer slice are caller-owned.
 pub fn getClipboardMimeTypes(self: *App, allocator: std.mem.Allocator) !?[][]u8 {
     return self.backend.getClipboardMimeTypes(allocator);
 }
 
 /// Read one MIME representation. Returns null when the clipboard is empty.
+/// `error.Uninitialized` means the backend has no clipboard support;
 /// `error.WouldBlock` means the async transfer is still in progress;
 /// `error.Unsupported` means this MIME type is not offered.
 pub fn getClipboardData(
@@ -114,6 +148,7 @@ pub fn getClipboardData(
 }
 
 /// Set one MIME representation. The backend copies `mime` and `data`.
+/// Returns `error.Uninitialized` when the backend has no clipboard support.
 pub fn setClipboardData(self: *App, mime: []const u8, data: []const u8) !void {
     return self.backend.setClipboardData(mime, data);
 }

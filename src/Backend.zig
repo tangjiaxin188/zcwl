@@ -1,9 +1,10 @@
-//! Compile-time backend dispatcher. `build.zig` generates
-//! `backend_selected.zig` with exactly one backend import, so unselected
-//! backends are not parsed or compiled.
+//! Compile-time backend dispatcher. `build.zig` supplies the
+//! `backend_selected` module, which imports exactly one backend, so
+//! unselected backends are not parsed or compiled.
 //!
 //!   .wayland => linux/wayland/backend.zig
-//!   .x11 / .both / .windows / .macos / .null => null (TODO for non-null)
+//!   .null    => null/backend.zig
+//!   other    => rejected by build.zig (not implemented yet)
 
 const std = @import("std");
 
@@ -24,14 +25,23 @@ pub const kind: Kind = switch (options.backend) {
     .macos => .macos,
 };
 
-/// What is actually linked. Only `.wayland` has a real driver today; other
-/// selections fall back to null.
-pub const effective: Kind = switch (kind) {
-    .wayland => .wayland,
-    .x11, .both, .windows, .macos, .null => .null,
-};
+/// What is actually linked. Unimplemented selections are rejected by
+/// `build.zig`, so this always matches `kind`.
+pub const effective: Kind = kind;
 
-const impl = @import("backend_selected.zig").impl;
+const selected = @import("backend_selected.zig");
+
+comptime {
+    // build.zig generates this file. If another build with a different
+    // -Dbackend overwrote it between generation and compilation, fail with a
+    // clear message instead of an unrelated protocol/type error.
+    if (!std.mem.eql(u8, selected.name, @tagName(options.backend))) {
+        @compileError("backend_selected.zig does not match -Dbackend; " ++
+            "run builds with different -Dbackend values serially");
+    }
+}
+
+const impl = selected.impl;
 
 /// The backend object stored by `App`.
 pub const Handle = impl.Backend;
@@ -39,6 +49,42 @@ pub const NativeWindow = General.NativeWindow;
 pub const NativeContext = impl.NativeContext;
 pub const Window = impl.Window;
 pub const Context = impl.Context;
+
+// Compile-time backend contract check. A missing declaration is reported
+// here instead of surfacing deep inside the forwarding wrappers.
+comptime {
+    for (.{
+        "Backend",          "NativeContext",    "Window",                      "Context",
+        "init",             "uninit",           "initWindow",                  "initContext",
+        "pollEvent",        "pushEvent",        "getVulkanInstanceExtensions", "getInfo",
+        "getMonitors",      "setClipboardText", "getClipboardText",            "getClipboardMimeTypes",
+        "getClipboardData", "setClipboardData", "setClipboardItems",
+    }) |name| {
+        if (!@hasDecl(impl, name)) @compileError("backend missing declaration: " ++ name);
+        _ = @field(impl, name);
+    }
+
+    for (.{
+        "getId",            "uninit",             "getNative",        "setTitle",            "getTitle",
+        "setMaxSize",       "setMinSize",         "setSize",          "getSize",             "setPos",
+        "getPos",           "getFramebufferSize", "getDpiScale",      "setResizable",        "setFullscreen",
+        "minimize",         "maximize",           "setFocus",         "requestAttention",    "setCursor",
+        "setCursorVisible", "setAspectRatio",     "setImeAllowed",    "setImeCursorArea",    "getInfo",
+        "setIcon",          "setDecorated",       "setAlwaysOnTop",   "setOpacity",          "setVisible",
+        "startDragFiles",   "setCursorImage",     "clearCursorImage", "createVulkanSurface",
+    }) |name| {
+        if (!@hasDecl(impl.Window, name)) @compileError("backend Window missing method: " ++ name);
+        _ = @field(impl.Window, name);
+    }
+
+    for (.{
+        "getKind",      "getInfo",        "getNative",   "uninit",          "makeCurrent",
+        "clearCurrent", "getProcAddress", "swapBuffers", "setSwapInterval",
+    }) |name| {
+        if (!@hasDecl(impl.Context, name)) @compileError("backend Context missing method: " ++ name);
+        _ = @field(impl.Context, name);
+    }
+}
 
 pub fn init(alloc: std.mem.Allocator, config: Config.AppConfig) !*Handle {
     return impl.init(alloc, config);

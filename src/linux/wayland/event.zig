@@ -2,34 +2,12 @@
 //!
 //! `push` deliberately does not copy borrowed payloads. Text produced by
 //! xkb/IME is copied by the backend before it enters the queue (see
-//! `Backend.pushText`), so the queue itself stays allocation-free per event.
+//! `Backend.textThunk`), so the queue itself stays allocation-free per event.
 
-const std = @import("std");
 const Event = @import("../../Event.zig");
 const c = @import("protocols.zig").c;
 
-pub const Queue = struct {
-    alloc: std.mem.Allocator,
-    items: std.ArrayList(Event.Core) = .empty,
-
-    pub fn init(alloc: std.mem.Allocator) Queue {
-        return .{ .alloc = alloc };
-    }
-
-    pub fn deinit(self: *Queue) void {
-        self.items.deinit(self.alloc);
-    }
-
-    pub fn push(self: *Queue, ev: Event.Core) bool {
-        self.items.append(self.alloc, ev) catch return false;
-        return true;
-    }
-
-    pub fn pop(self: *Queue) ?Event.Core {
-        if (self.items.items.len == 0) return null;
-        return self.items.orderedRemove(0);
-    }
-};
+pub const Queue = @import("../../EventQueue.zig").Queue;
 
 /// Callback interface implemented by `Backend` and handed to `input.zig` /
 /// `ime.zig`. Keeping it as function pointers avoids a circular type
@@ -41,6 +19,9 @@ pub const Sink = struct {
     surface_window_fn: *const fn (ctx: *anyopaque, surface: ?*c.struct_wl_surface) ?u32,
     apply_cursor_fn: *const fn (ctx: *anyopaque, window_id: u32, serial: u32) void,
     focus_fn: *const fn (ctx: *anyopaque, window_id: ?u32) void,
+    ime_allowed_fn: *const fn (ctx: *anyopaque, window_id: u32) bool,
+    report_fn: *const fn (ctx: *anyopaque, err: anyerror) void,
+    pointer_changed_fn: *const fn (ctx: *anyopaque, pointer: ?*c.struct_wl_pointer) void,
 
     pub fn push(self: Sink, ev: Event.Core) void {
         self.push_fn(self.ctx, ev);
@@ -60,5 +41,20 @@ pub const Sink = struct {
 
     pub fn focus(self: Sink, window_id: ?u32) void {
         self.focus_fn(self.ctx, window_id);
+    }
+
+    /// Per-window IME switch. Missing/destroyed windows are disabled.
+    pub fn imeAllowed(self: Sink, window_id: u32) bool {
+        return self.ime_allowed_fn(self.ctx, window_id);
+    }
+
+    /// Route a diagnostic to the App-owned reporter.
+    pub fn report(self: Sink, err: anyerror) void {
+        self.report_fn(self.ctx, err);
+    }
+
+    /// Notify the backend that the seat's pointer proxy changed.
+    pub fn pointerChanged(self: Sink, pointer: ?*c.struct_wl_pointer) void {
+        self.pointer_changed_fn(self.ctx, pointer);
     }
 };

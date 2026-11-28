@@ -2,9 +2,11 @@
 
 > 英文版：[`backend_en.md`](backend_en.md)
 
-**状态**：本文档描述平台无关层已经依赖的完整后端契约。当前只有
-`src/null/backend.zig` 实现，所有 `-Dbackend=...` 选择都会回退到 null。真实后端必须
-实现本契约；`test/api_test.zig` 会在编译期检查公开 API 及其调用的后端方法是否齐全。
+**状态**：本文档描述平台无关层已经依赖的完整后端契约。已实现：
+`src/linux/wayland/backend.zig`、`src/null/backend.zig`。未实现的选项
+（x11/both/windows/macos）会在 `build.zig` 编译期被拒绝，不再静默回退到 null。
+真实后端必须实现本契约；`Backend.zig` 有编译期方法存在性检查，
+`test/api_test.zig` 检查公开 API 与行为。
 
 ---
 
@@ -34,8 +36,8 @@ src/<os>/
 - `backend.zig` 只做 re-export 与组合；类型方法放在 `window.zig` / `context.zig`。
 - 平台代码不得 import `App.zig` / `Window.zig` / `Context.zig`（避免上层→后端→上层的
   反向依赖和循环）。
-- 共享叶子模块只有 `General.zig`、`Config.zig`、`Event.zig`、`Vulkan.zig`。
-- `Backend.zig` 通过编译期选择 re-export 一个后端的
+- 共享叶子模块只有 `General.zig`、`Config.zig`、`Event.zig`、`Vulkan.zig`、`EventQueue.zig`。
+- `Backend.zig` 通过 `backend_selected.zig` 编译期 re-export 一个后端的
   `Backend`/`Window`/`Context`/`NativeContext`/函数。
 
 ---
@@ -106,8 +108,9 @@ pub const BackendInfo = struct {
 时对应字段为 `null`。库不解释、不拥有这些值。
 
 `Config.AppConfig` 提供 `application_id`（`[]const u8`，默认空，空值由后端回退为
-`"zcwl-app"`），Wayland 后端用它调用 `xdg_toplevel.set_app_id`；`WindowConfig` /
-`ContextConfig` 是具体的创建参数。
+`"zcwl-app"`）和 `reporter: General.Reporter`（默认静默）。Wayland 后端用
+application_id 调用 `xdg_toplevel.set_app_id`，并通过 `config.reporter` 上报初始化信息与
+异步诊断；后端不得使用全局 reporter 变量。`WindowConfig` / `ContextConfig` 是具体的创建参数。
 
 ---
 
@@ -187,10 +190,11 @@ pub fn clearCursorImage(self: *Window, state: General.Cursor) !void;
 
 自定义鼠标图案规则：
 
-- `Config.CursorImage` 的 `pixels` 是行优先 RGBA8，`width * height * 4` 字节；
-- `setCursorImage(state, image)` 为指定 `General.Cursor` 状态配置图案，调用方决定内容；
+- `Config.CursorImage` 的 `pixels` 是行优先、直通 alpha 的 RGBA8，长度严格等于 `width * height * 4`；
+- 库负责预乘 alpha 并写入 `WL_SHM_FORMAT_ARGB8888`；
+- `setCursorImage(state, image)` 为指定 `General.Cursor` 状态配置图案，按键状态全局生效（最后设置者覆盖）；
 - 之后 `setCursor(state)` 时优先使用该状态的图案；
-- `clearCursorImage(state)` 删除图案并恢复系统 shape；
+- `clearCursorImage(state)` 删除图案并恢复系统 shape，影响所有窗口；
 - 库只负责创建 `wl_shm` surface 并调用 `wl_pointer.set_cursor`，不内置 move/文件图案；
 - 没有自定义图案时不会改变 cursor。
 
@@ -234,28 +238,28 @@ pub const Window = struct {
     pub fn setTitle(self: *Window, title: []const u8) !void;
     pub fn getTitle(self: *Window) []const u8; // 借用，直到下一次 set
 
-    pub fn setMaxSize(self: *Window, max_size: ?General.Size) void;
-    pub fn setMinSize(self: *Window, min_size: ?General.Size) void;
-    pub fn setSize(self: *Window, size: General.Size) void;
+    pub fn setMaxSize(self: *Window, max_size: ?General.Size) !void;
+    pub fn setMinSize(self: *Window, min_size: ?General.Size) !void;
+    pub fn setSize(self: *Window, size: General.Size) !void;
     pub fn getSize(self: *Window) General.Size;
-    pub fn setPos(self: *Window, pos: General.Position) void;
+    pub fn setPos(self: *Window, pos: General.Position) !void;
     pub fn getPos(self: *Window) ?General.Position;
     pub fn getFramebufferSize(self: *Window) General.Size;
     pub fn getDpiScale(self: *Window) f32;
 
-    pub fn setResizable(self: *Window, resizable: bool) void;
+    pub fn setResizable(self: *Window, resizable: bool) !void;
     pub fn setFullscreen(self: *Window, fullscreen: bool) !void;
-    pub fn minimize(self: *Window) void;
-    pub fn maximize(self: *Window) void;
-    pub fn setFocus(self: *Window) void;
+    pub fn minimize(self: *Window) !void;
+    pub fn maximize(self: *Window) !void;
+    pub fn setFocus(self: *Window) !void;
     pub fn requestAttention(self: *Window) !void;
 
     pub fn setCursor(self: *Window, cursor: General.Cursor) !void;
-    pub fn setCursorVisible(self: *Window, visible: bool) void;
-    pub fn setAspectRatio(self: *Window, ratio: ?General.Ratio) void;
+    pub fn setCursorVisible(self: *Window, visible: bool) !void;
+    pub fn setAspectRatio(self: *Window, ratio: ?General.Ratio) !void;
 
     pub fn setImeAllowed(self: *Window, allowed: bool) !void;
-    pub fn setImeCursorArea(self: *Window, pos: General.Position, size: General.Size) void;
+    pub fn setImeCursorArea(self: *Window, pos: General.Position, size: General.Size) !void;
 
     pub fn getInfo(self: *Window) General.WindowInfo;
 
@@ -263,6 +267,7 @@ pub const Window = struct {
     pub fn setDecorated(self: *Window, decorated: bool) !void;
     pub fn setAlwaysOnTop(self: *Window, always_on_top: bool) !void;
     pub fn setOpacity(self: *Window, opacity: f32) !void;
+    pub fn setVisible(self: *Window, visible: bool) !void;
 
     pub fn createVulkanSurface(
         self: *Window,
@@ -290,14 +295,15 @@ pub const Window = struct {
 | `setFocus` | 请求焦点；平台可忽略（Wayland 由合成器决定）。 |
 | `requestAttention` | 请求用户注意；不支持返回 `error.Unsupported`。 |
 | `setCursor` | 设置鼠标光标形状；失败返回错误。 |
-| `setCursorVisible` | 显示/隐藏光标；不支持时 no-op/记录。 |
+| `setCursorVisible` | 显示/隐藏光标；无 pointer 返回 `Unsupported`，无有效 serial 返回 `WouldBlock`。 |
 | `setAspectRatio` | 宽高比限制；`null` 清除；不支持时 no-op/记录。 |
 | `setImeAllowed` / `setImeCursorArea` | 启用 IME / 设置候选框区域；不支持返回错误或 no-op（按平台）。 |
 | `getInfo` | 返回一致的当前状态快照；所有 getter 应从这里取值。 |
 | `setIcon` | RGBA8 图标；不支持返回 `error.Unsupported`。 |
 | `setDecorated` | 装饰开关；Wayland 可用 xdg-decoration/CSD，其他平台对应 API。 |
 | `setAlwaysOnTop` | 置顶；Wayland xdg-shell 无标准实现，可返回 `error.Unsupported`。 |
-| `setOpacity` | 整窗不透明度；失败由上层 `General.error_reporter` 记录，不抛异常。 |
+| `setOpacity` | 整窗不透明度；失败直接返回错误，由上层决定是否忽略。 |
+| `setVisible` | 显示窗口；`false` 表示隐藏，无法隐藏的后端返回 `error.Unsupported`。Wayland 只延迟首次映射。 |
 | `createVulkanSurface` | 用调用方 loader 创建 `VkSurfaceKHR`；一个窗口只能成功一次，第二次返回 `error.WindowHadVulkanSurface`。 |
 
 注意：
@@ -352,11 +358,14 @@ pub const Context = struct {
   前有效。`pushEvent` 的线程安全由后端文档声明；不保证时仅主线程调用。
 - **错误**：不支持的功能返回 `error.Unsupported`；上层已拦截的路径返回
   `error.UnsupportedApi`；其他约定错误名：
-  `WindowHadContext`、`WindowHadVulkanSurface`、`IncompatibleShareContext`。
+  `WindowHadContext`、`WindowHadVulkanSurface`、`IncompatibleShareContext`、
+  `BackendUnavailable`、`InvalidRatio`、`NotCurrent`。
+  `WouldBlock` 专指缺少 pointer serial 或剪贴板异步数据尚未就绪（接口文档注明具体含义）。
 - **不要为“平台不支持” panic**：只有违反契约（空指针、重复初始化等）才可
-  `panic`/`unreachable`。
-- **Opacity**：`Window.setOpacity` 的上层会捕获后端 `!void` 错误并交给
-  `General.error_reporter`，因此后端返回错误即可，不要抛异常。
+  `panic`/`unreachable`。未实现的后端由 `build.zig` 在编译期拒绝。
+- **诊断**：后端通过 `config.reporter.reportError/reportInfo` 上报无法返回的诊断；
+  持有 `Sink` 的子系统用 `sink.report(err)`，持有 `*Backend` 的用 `backend.reportError(err)`。
+  上层 setter 不再捕获错误写 reporter，而是直接把错误返回给调用方。
 - **线程安全**：`Backend`/`Window`/`Context` 默认不是线程安全的；需要跨线程
   使用时由用户同步。Context 的“当前上下文”状态由上层 `threadlocal` 维护。
 
@@ -367,7 +376,14 @@ pub const Context = struct {
 - `build.zig` 的 `-Dbackend=auto|null|wayland|x11|both|windows|macos` 选择后端；
   `auto` 由 `build.zig` 根据 target OS 解析并校验。
 - `src/Backend.zig` 只做编译期 dispatch：`Kind = General.BackendKind`，
-  `effective` 表示实际链接的后端；未实现的选项回退到 null。
+  `effective` 与 `kind` 一致；未实现的选项在 `build.zig` 编译期报错，
+  `App.init` 还有 `error.BackendUnavailable` 运行时兜底。
+- `src/backend_selected.zig` 由 `build.zig` 生成（gitignored），只包含选中后端的
+  一条 `@import`，未选中的后端不会被解析或分析。生成是必要的：静态 comptime switch
+  仍会让 Zig 解析未选中分支的 import 路径，导致 null-only 构建依赖 Wayland 生成文件。
+  注意：不同 `-Dbackend` 的构建会覆盖同一个 selector 文件，跨进程并行构建需串行执行。
+  selector 和协议生成物都用原子写（临时文件 + rename）；`Backend.zig` 会校验
+  selector 的 `name` 与 `-Dbackend` 一致，被并发构建覆盖时给出明确编译错误。
 - `src/root.zig` 导出 `Backend`，用户可命名 `Backend.NativeContext`，并通过
   `App.getBackendInfo()` 获取平台/上下文创建器。
 
@@ -376,11 +392,12 @@ pub const Context = struct {
 ## 8. 契约测试
 
 ```bash
-zig build test null
+zig build test -Dbackend=null
 ```
 
 `test/api_test.zig` 会：
 
 - 用 `comptime` 引用全部公开 API，强迫分析上层包装方法；
 - 调用 `App.init` / `createWindow` / `createContext` 等入口，检查后端方法签名；
-- 不传 mock、不断言平台行为。
+- 在 null 后端下断言若干平台无关行为（事件队列、窗口销毁、API 门禁、比例校验）；
+- 不传 mock、不断言具体平台行为。无 compositor 时 Wayland 套件中的用例会静默跳过。

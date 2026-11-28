@@ -13,7 +13,7 @@ cursor-shape、alpha-modifier、text-input-v3、Vulkan WSI）。后端接口契�
   instance/device/swapchain 全部由用户持有。
 - 透明窗口：默认支持逐像素 alpha（EGL config alpha ≥ 8 / ARGB buffer；
   Vulkan swapchain 由用户选择 alpha format + compositeAlpha）。
-- 未实现的路径仍然回退 null 后端。
+- 未实现的后端（x11/both/windows/macos）在构建期被拒绝，不再回退 null。
 - 编译期选择：`-Dbackend=wayland`（Linux 默认 `auto` → wayland；`both` 待 X11 后端）。
 
 The backend contract is in `backend_en.md` (Chinese: `backend_zh.md`); this
@@ -139,7 +139,7 @@ wayland-scanner private-code  "$XML" src/linux/wayland/protocols/xdg-shell-proto
    ```zig
    const display = wl_display_connect(null) orelse return error.WaylandConnectFailed;
    ```
-   `both` 模式下连接失败应让 `Backend.init` 返回错误，由上层/构建时的运行时分派逻辑回退 X11。
+   `both` 模式目前未实现，构建期即被拒绝；Wayland 连接失败直接返回错误，不做运行时回退。
 
 2. **获取 registry 并绑定 globals**
    ```zig
@@ -201,7 +201,10 @@ wayland-scanner private-code  "$XML" src/linux/wayland/protocols/xdg-shell-proto
 5. **seat / output 子对象**
    - `wl_seat` 绑定后添加 capabilities/keymap 等 listener；
    - `wl_output` 绑定后处理 geometry/mode/scale/name/description/done；
-   - 热插拔：`wl_registry.global`/`global_remove` 更新 monitors 和 seat 列表。
+   - 热插拔：`wl_registry.global` 新增 output 后由 `Backend.pollEvent` 补建 monitor；
+     `global_remove` 会移除对应 monitor 并清理窗口的 output 列表。
+   - `wl_seat` 热插拔仍未实现；seat 移除后相关代理不会自动重建。
+   - tablet/tablet tool 的 `removed` 只标记状态，条目保留到 `TabletSeat.deinit()`；设备热插拔不会立即从列表移除。
 
 ### 3.2 EGL / OpenGL / OpenGL ES
 
@@ -254,8 +257,8 @@ eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_KHR, wl_display, null)
 - backend window 顺序：
   `xdg_toplevel.destroy` → `xdg_surface.destroy` → `wl_surface.destroy`
   → `wl_egl_window_destroy`（如果由 backend 持有）→ 释放窗口状态；
-- `Backend.uninit`：销毁 seats/outputs/registry，`eglTerminate`（如果 EGLDisplay 已建立），
-  `wl_display_flush`，`wl_display_disconnect`；
+- `Backend.uninit`：销毁 seats/outputs/registry，`wl_display_flush`，
+  `wl_display_disconnect`；当前**不调用** `eglTerminate`（已知限制，见 4.1）；
 - 不发送 `window_destroyed`；`window_should_close` 只是请求。
 
 ### 3.5 xdg-shell 关键规则
@@ -277,7 +280,7 @@ eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_KHR, wl_display, null)
 | 接口 | Wayland 实现 / 协议 | 说明 |
 |---|---|---|
 | `init` | `wl_display_connect`、`wl_registry`、`wl_compositor`、`wl_shm`、`wl_seat`、`wl_output`、`xdg_wm_base`、`wl_data_device_manager` | 缺失必需 global 时返回 `error.Unsupported` / `error.WaylandConnectFailed` |
-| `uninit` | 销毁 seats/outputs/registry → `eglTerminate`（如有）→ `wl_display_disconnect` | 顺序不可反；Context/窗口先由上层销毁 |
+| `uninit` | 销毁 seats/outputs/registry → `wl_display_disconnect`（当前不调用 `eglTerminate`） | 顺序不可反；Context/窗口先由上层销毁 |
 | `initWindow` | `wl_compositor.create_surface`、`xdg_wm_base.get_xdg_surface`、`xdg_surface.get_toplevel` | 首次 commit 前等 configure 并 ack |
 | `initContext` | EGL：`eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_KHR, ...)` | 见 3.2；`share` 传给 `eglCreateContext` |
 | `pollEvent` | `wl_display_dispatch_pending` + 内部队列 | 非阻塞；空队列写 `.none` 返回 false |
@@ -314,7 +317,8 @@ eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_KHR, wl_display, null)
 | `setIcon` | `xdg_toplevel_icon_v1`（staging，可选） | 无协议返回 `error.Unsupported` |
 | `setDecorated` | `zxdg_toplevel_decoration_v1`（可选）或 CSD | 服务端装饰/客户端装饰二选一 |
 | `setAlwaysOnTop` | xdg-shell 无标准 | 返回 `error.Unsupported`（layer-shell 不做默认） |
-| `setOpacity` | `wp_alpha_modifier_v1`（staging，可选） | 无协议返回 `error.Unsupported`；上层 reporter 记录 |
+| `setOpacity` | `wp_alpha_modifier_v1`（staging，可选） | 无协议返回 `error.Unsupported`；错误直接返回给调用方 |
+| `setVisible` | 首次 `wl_surface.commit` | `false` 延迟首次映射；已映射窗口无法取消映射，返回 `error.Unsupported` |
 | `getInfo` | 缓存 configure/scale/state | 所有 getter 基于此 |
 | `createVulkanSurface` | `vkCreateWaylandSurfaceKHR` | 见 3.3；一个窗口一次 |
 
@@ -348,7 +352,7 @@ eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_KHR, wl_display, null)
 | `window_resized` | `xdg_toplevel.configure` + `xdg_surface.configure` | 更新 size；0 表示建议 |
 | `window_scale_changed` | `wl_output.scale` / `wp_fractional_scale_v1.preferred_scale` | 输出 enter/leave 时计算 |
 | `window_focus_gained/lost` | `xdg_toplevel.configure` states 或 keyboard enter/leave | 按实现选择 |
-| `window_minimized/maximized/restored` | `xdg_toplevel.configure` states | `activated`/`maximized`/`fullscreen` |
+| `window_maximized/restored` | `xdg_toplevel.configure` 的 `maximized` state | 状态变化时发出；`window_minimized` 无对应 xdg state，不产生 |
 | `pen_*` | `zwp_tablet_tool_v2` | pressure/tilt/rotation/eraser；已实现，无协议则不产生 |
 | `custom` | `pushEvent` | 后端不解释 |
 | `unknown` | 未映射事件 | 保留 |
@@ -374,7 +378,7 @@ Wayland 没有全局窗口位置，因此通常不产生 `window_moved`；`getPo
 
 - `wl_output`：`geometry`、`mode`、`scale`、`name`/`description`（v4）、`done`；
 - `xdg_output_v1`（可选）：`logical_position`、`logical_size`、`name`、`description`；
-- `getMonitors` 每次分配 `[]MonitorInfo`；`name` 由后端持有或复制到数组生命周期；
+- `getMonitors` 每次分配 `[]MonitorInfo`；`name` 借用对应 `Monitor`，在 output 被移除或 `App.uninit` 前有效；
 - `window_scale_changed` 在窗口进入不同 output 或 output scale/fractional 变化时发出；
 - 热插拔通过 `wl_registry.global/global_remove` 更新列表。
 
@@ -581,7 +585,9 @@ wayland-scanner private-code \
 - `Window`/`Context`/`Monitor`/`Clipboard` 的销毁顺序由 `App`/`Backend` 统一管理；
   内存测试在 `test/api_test.zig`（`std.testing.allocator` + `checkAllAllocationFailures`）。
 - 库代码不调用 `std.debug.print`/`std.log`；无法通过返回值报告的清理错误走
-  `General.reportError`，初始化信息走 `General.info_reporter`。
+  `config.reporter.reportError`（持有 `Sink` 的子系统用 `sink.report`，持有
+  `*Backend` 的用 `backend.reportError`），初始化信息走
+  `config.reporter.reportInfo`。reporter 属于 `App` 实例，没有全局变量。
 - `dlopen`、EGL、xkbcommon、Wayland 库的内部内存由 libc/库自身管理，不属于传入
   allocator；本库只负责关闭自己持有的句柄。
 

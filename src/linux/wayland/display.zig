@@ -11,6 +11,7 @@ const c = @import("protocols.zig").c;
 pub const Display = @This();
 
 alloc: std.mem.Allocator,
+reporter: General.Reporter,
 display: *c.struct_wl_display,
 registry: ?*c.struct_wl_registry = null,
 
@@ -27,6 +28,12 @@ text_input_manager: ?*c.struct_zwp_text_input_manager_v3 = null,
 tablet_manager: ?*c.struct_zwp_tablet_manager_v2 = null,
 
 outputs: std.ArrayList(Global) = .empty,
+/// Set when `wl_output` globals are added or removed; `Backend` reconciles its
+/// monitor list after dispatch.
+outputs_dirty: bool = false,
+/// `wl_output` globals removed by the compositor; drained by `Backend` after
+/// dispatch so monitor/window state can be reconciled outside the callback.
+removed_outputs: std.ArrayList(u32) = .empty,
 
 pub const Global = struct {
     name: u32,
@@ -41,14 +48,14 @@ pub const InitError = error{
     OutOfMemory,
 };
 
-pub fn init(alloc: std.mem.Allocator) InitError!*Display {
+pub fn init(alloc: std.mem.Allocator, reporter: General.Reporter) InitError!*Display {
     const dpy = c.wl_display_connect(null) orelse return error.WaylandConnectFailed;
 
     const self = alloc.create(Display) catch {
         c.wl_display_disconnect(dpy);
         return error.OutOfMemory;
     };
-    self.* = .{ .alloc = alloc, .display = dpy };
+    self.* = .{ .alloc = alloc, .reporter = reporter, .display = dpy };
     errdefer self.uninit();
 
     self.registry = c.wl_display_get_registry(dpy) orelse return error.WaylandConnectFailed;
@@ -62,6 +69,7 @@ pub fn init(alloc: std.mem.Allocator) InitError!*Display {
 
 pub fn uninit(self: *Display) void {
     self.outputs.deinit(self.alloc);
+    self.removed_outputs.deinit(self.alloc);
 
     if (self.text_input_manager) |v| c.zwp_text_input_manager_v3_destroy(v);
     if (self.tablet_manager) |v| c.zwp_tablet_manager_v2_destroy(v);
@@ -72,7 +80,14 @@ pub fn uninit(self: *Display) void {
 
     if (self.data_device_manager) |v| c.wl_data_device_manager_destroy(v);
     if (self.wm_base) |v| c.xdg_wm_base_destroy(v);
-    if (self.seat) |v| c.wl_seat_release(v);
+    if (self.seat) |v| {
+        // wl_seat.release is a request since version 5.
+        if (c.wl_seat_get_version(v) >= 5) {
+            c.wl_seat_release(v);
+        } else {
+            c.wl_seat_destroy(v);
+        }
+    }
     if (self.compositor) |v| c.wl_compositor_destroy(v);
     if (self.registry) |v| c.wl_registry_destroy(v);
 
@@ -84,7 +99,7 @@ pub fn uninit(self: *Display) void {
 /// Non-blocking event pump used by `Backend.pollEvent`.
 pub fn pump(self: *Display) void {
     if (c.wl_display_dispatch_pending(self.display) < 0) {
-        General.reportError(error.WaylandDispatchFailed);
+        self.reporter.reportError(error.WaylandDispatchFailed);
         return;
     }
 
@@ -93,7 +108,7 @@ pub fn pump(self: *Display) void {
         return;
     }
 
-    if (c.wl_display_flush(self.display) < 0) General.reportError(error.WaylandFlushFailed);
+    if (c.wl_display_flush(self.display) < 0) self.reporter.reportError(error.WaylandFlushFailed);
 
     var fds = [_]std.posix.pollfd{.{
         .fd = c.wl_display_get_fd(self.display),
@@ -103,7 +118,7 @@ pub fn pump(self: *Display) void {
     const ready = std.posix.poll(&fds, 0) catch 0;
     if (ready > 0 and (fds[0].revents & std.posix.POLL.IN) != 0) {
         if (c.wl_display_read_events(self.display) < 0) {
-            General.reportError(error.WaylandDispatchFailed);
+            self.reporter.reportError(error.WaylandDispatchFailed);
             return;
         }
         _ = c.wl_display_dispatch_pending(self.display);
@@ -113,11 +128,11 @@ pub fn pump(self: *Display) void {
 }
 
 pub fn flush(self: *Display) void {
-    if (c.wl_display_flush(self.display) < 0) General.reportError(error.WaylandFlushFailed);
+    if (c.wl_display_flush(self.display) < 0) self.reporter.reportError(error.WaylandFlushFailed);
 }
 
 pub fn roundtrip(self: *Display) void {
-    if (c.wl_display_roundtrip(self.display) < 0) General.reportError(error.WaylandRoundtripFailed);
+    if (c.wl_display_roundtrip(self.display) < 0) self.reporter.reportError(error.WaylandRoundtripFailed);
 }
 
 pub fn bindOutput(self: *Display, global: Global) ?*c.struct_wl_output {
@@ -180,14 +195,22 @@ fn registryGlobal(
         if (self.tablet_manager == null)
             self.tablet_manager = bind(c.struct_zwp_tablet_manager_v2, registry, name, &c.zwp_tablet_manager_v2_interface, 1);
     } else if (std.mem.eql(u8, iface, "wl_output")) {
-        self.outputs.append(self.alloc, .{ .name = name, .version = version }) catch |err| General.reportError(err);
+        self.outputs.append(self.alloc, .{ .name = name, .version = version }) catch |err| self.reporter.reportError(err);
+        self.outputs_dirty = true;
     }
 }
 
 fn registryGlobalRemove(data: ?*anyopaque, registry: ?*c.struct_wl_registry, name: u32) callconv(.c) void {
-    _ = data;
     _ = registry;
-    _ = name;
+    const self: *Display = @ptrCast(@alignCast(data orelse return));
+    var i: usize = 0;
+    while (i < self.outputs.items.len) : (i += 1) {
+        if (self.outputs.items[i].name != name) continue;
+        _ = self.outputs.orderedRemove(i);
+        self.removed_outputs.append(self.alloc, name) catch |err| self.reporter.reportError(err);
+        self.outputs_dirty = true;
+        return;
+    }
 }
 
 const wm_base_listener = c.struct_xdg_wm_base_listener{

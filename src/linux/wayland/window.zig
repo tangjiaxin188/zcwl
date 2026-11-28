@@ -41,6 +41,7 @@ opacity: f32 = 1.0,
 fullscreen: bool = false,
 maximized: bool = false,
 minimized: bool = false,
+visible: bool = true,
 client_api: General.GraphicsApi,
 focused: bool = false,
 configured: bool = false,
@@ -77,7 +78,10 @@ pub fn init(backend: *Backend, config: Config.WindowConfig, id: u32) !*Window {
 
     const title = try dupeZ(backend.alloc, config.title);
     errdefer backend.alloc.free(title);
-    const app_id = try dupeZ(backend.alloc, backend.app_id);
+    // `Backend.app_id` is stored NUL-terminated; strip that sentinel before
+    // `dupeZ` appends the window's own.
+    const base_app_id = if (backend.app_id.len > 0) backend.app_id[0 .. backend.app_id.len - 1] else backend.app_id;
+    const app_id = try dupeZ(backend.alloc, base_app_id);
     errdefer backend.alloc.free(app_id);
 
     const self = try backend.alloc.create(Window);
@@ -97,6 +101,7 @@ pub fn init(backend: *Backend, config: Config.WindowConfig, id: u32) !*Window {
         .decorated = config.decorated,
         .always_on_top = config.always_on_top,
         .client_api = config.client_api,
+        .visible = config.visible,
     };
 
     _ = c.wl_surface_add_listener(surface, &surface_listener, self);
@@ -115,10 +120,13 @@ pub fn init(backend: *Backend, config: Config.WindowConfig, id: u32) !*Window {
     }
 
     // The first commit lets the compositor send the initial configure.
-    c.wl_surface_commit(surface);
+    // Wayland cannot unmap a mapped toplevel, so `visible = false` only
+    // delays this commit until setVisible(true).
+    self.requestCommit();
     return self;
 }
 pub fn uninit(self: *Window) void {
+    if (self.backend.ime) |*ime| ime.windowDestroyed(self.id);
     if (self.alpha_surface) |alpha| c.wp_alpha_modifier_surface_v1_destroy(alpha);
     if (self.decoration) |*decoration| decoration.deinit();
     self.outputs.deinit(self.alloc);
@@ -151,24 +159,27 @@ pub fn setTitle(self: *Window, title: []const u8) !void {
 }
 
 pub fn getTitle(self: *Window) []const u8 {
-    return self.title;
+    // `title` is NUL-terminated for xdg_toplevel_set_title; the public slice
+    // must not include that sentinel (the null backend returns the exact text).
+    if (self.title.len == 0) return "";
+    return self.title[0 .. self.title.len - 1];
 }
 
-pub fn setMaxSize(self: *Window, max_size: ?General.Size) void {
+pub fn setMaxSize(self: *Window, max_size: ?General.Size) !void {
     self.max_size = max_size;
     self.applySizeLimits();
 }
 
-pub fn setMinSize(self: *Window, min_size: ?General.Size) void {
+pub fn setMinSize(self: *Window, min_size: ?General.Size) !void {
     self.min_size = min_size;
     self.applySizeLimits();
 }
 
-pub fn setSize(self: *Window, size: General.Size) void {
+pub fn setSize(self: *Window, size: General.Size) !void {
     self.requested_size = size;
     if (!self.configured) self.size = size;
     self.backend.resizeContexts(self.id, size);
-    c.wl_surface_commit(self.surface);
+    self.requestCommit();
 }
 
 pub fn getSize(self: *Window) General.Size {
@@ -179,7 +190,7 @@ pub fn getRequestedSize(self: *Window) General.Size {
     return self.requested_size;
 }
 
-pub fn setPos(self: *Window, pos: General.Position) void {
+pub fn setPos(self: *Window, pos: General.Position) !void {
     _ = self;
     _ = pos;
 }
@@ -190,17 +201,14 @@ pub fn getPos(self: *Window) ?General.Position {
 }
 
 pub fn getFramebufferSize(self: *Window) General.Size {
-    return .{
-        .w = @intFromFloat(@as(f32, @floatFromInt(self.size.w)) * self.scale),
-        .h = @intFromFloat(@as(f32, @floatFromInt(self.size.h)) * self.scale),
-    };
+    return General.scaledSize(self.size, self.scale);
 }
 
 pub fn getDpiScale(self: *Window) f32 {
     return self.scale;
 }
 
-pub fn setResizable(self: *Window, resizable: bool) void {
+pub fn setResizable(self: *Window, resizable: bool) !void {
     self.resizable = resizable;
     self.applySizeLimits();
 }
@@ -215,19 +223,19 @@ pub fn setFullscreen(self: *Window, fullscreen: bool) !void {
     self.requestCommit();
 }
 
-pub fn minimize(self: *Window) void {
+pub fn minimize(self: *Window) !void {
     c.xdg_toplevel_set_minimized(self.toplevel);
     self.minimized = true;
     self.requestCommit();
 }
 
-pub fn maximize(self: *Window) void {
+pub fn maximize(self: *Window) !void {
     c.xdg_toplevel_set_maximized(self.toplevel);
     self.maximized = true;
     self.requestCommit();
 }
 
-pub fn setFocus(self: *Window) void {
+pub fn setFocus(self: *Window) !void {
     _ = self;
 }
 
@@ -242,11 +250,9 @@ pub fn setCursor(self: *Window, shape: General.Cursor) !void {
     try self.backend.cursor.set(self.backend.input.pointerSerial(), shape);
 }
 
-pub fn setCursorVisible(self: *Window, visible: bool) void {
+pub fn setCursorVisible(self: *Window, visible: bool) !void {
     self.cursor_visible = visible;
-    self.backend.cursor.setVisible(self.backend.input.pointerSerial(), visible) catch |err| {
-        General.reportError(err);
-    };
+    try self.backend.cursor.setVisible(self.backend.input.pointerSerial(), visible);
 }
 
 pub fn setCursorImage(self: *Window, state: General.Cursor, image: Config.CursorImage) !void {
@@ -263,17 +269,26 @@ pub fn startDragFiles(self: *Window, paths: []const []const u8) !void {
     return self.backend.startDragFiles(self, paths);
 }
 
-pub fn setAspectRatio(self: *Window, ratio: ?General.Ratio) void {
+/// Show the window by committing the surface for the first time. Hiding a
+/// mapped toplevel is not possible with the standard xdg-shell protocol.
+pub fn setVisible(self: *Window, visible: bool) !void {
+    if (!visible) return error.Unsupported;
+    if (self.visible) return;
+    self.visible = true;
+    self.requestCommit();
+}
+
+pub fn setAspectRatio(self: *Window, ratio: ?General.Ratio) !void {
     self.aspect_ratio = ratio;
 }
 
 pub fn setImeAllowed(self: *Window, allowed: bool) !void {
     if (self.backend.ime == null) return error.Unsupported;
     self.ime_allowed = allowed;
-    self.backend.ime.?.setAllowed(allowed);
+    self.backend.ime.?.refresh();
 }
 
-pub fn setImeCursorArea(self: *Window, pos: General.Position, size: General.Size) void {
+pub fn setImeCursorArea(self: *Window, pos: General.Position, size: General.Size) !void {
     self.ime_pos = pos;
     self.ime_size = size;
     if (self.backend.ime) |*ime| ime.setCursorArea(self.id, pos, size);
@@ -309,7 +324,7 @@ pub fn setDecorated(self: *Window, decorated: bool) !void {
     if (self.decoration) |*decoration| {
         decoration.setMode(decorated);
         self.decorated = decorated;
-        c.wl_surface_commit(self.surface);
+        self.requestCommit();
         return;
     }
     return error.Unsupported;
@@ -322,6 +337,7 @@ pub fn setAlwaysOnTop(self: *Window, always_on_top: bool) !void {
 }
 
 pub fn setOpacity(self: *Window, opacity: f32) !void {
+    if (!std.math.isFinite(opacity)) return error.InvalidOpacity;
     const clamped = std.math.clamp(opacity, 0.0, 1.0);
     const alpha = self.alpha_surface orelse {
         if (clamped == 1.0) {
@@ -333,7 +349,7 @@ pub fn setOpacity(self: *Window, opacity: f32) !void {
     const factor: u32 = @intFromFloat(clamped * 256.0);
     c.wp_alpha_modifier_surface_v1_set_multiplier(alpha, factor);
     self.opacity = clamped;
-    c.wl_surface_commit(self.surface);
+    self.requestCommit();
 }
 
 pub fn createVulkanSurface(
@@ -357,11 +373,24 @@ pub fn hasOutput(self: *Window, output: *c.struct_wl_output) bool {
     return false;
 }
 
+/// Drop a removed `wl_output` from this window without destroying the proxy.
+/// The backend releases the proxy after all windows have forgotten it.
+pub fn forgetOutput(self: *Window, output: *c.struct_wl_output) void {
+    var i: usize = 0;
+    while (i < self.outputs.items.len) : (i += 1) {
+        if (self.outputs.items[i] == output) {
+            _ = self.outputs.orderedRemove(i);
+            self.updateScale();
+            return;
+        }
+    }
+}
+
 pub fn applyCursor(self: *Window, serial: u32) void {
     if (self.cursor_visible) {
-        self.backend.cursor.set(serial, self.cursor) catch |err| General.reportError(err);
+        self.backend.cursor.set(serial, self.cursor) catch |err| self.backend.reportError(err);
     } else {
-        self.backend.cursor.setVisible(serial, false) catch |err| General.reportError(err);
+        self.backend.cursor.setVisible(serial, false) catch |err| self.backend.reportError(err);
     }
 }
 
@@ -381,7 +410,10 @@ fn applySizeLimits(self: *Window) void {
     self.requestCommit();
 }
 
+/// All commits go through here. Before the window becomes visible, nothing
+/// is committed, so `visible = false` really delays the first map.
 fn requestCommit(self: *Window) void {
+    if (!self.visible) return;
     c.wl_surface_commit(self.surface);
 }
 
@@ -411,6 +443,9 @@ fn applyPendingConfigure(self: *Window) void {
         }
     }
     self.fullscreen = self.pending_fullscreen;
+    // An activated configure means the compositor restored/focused the
+    // window; xdg-shell has no explicit "unminimized" state.
+    if (self.focused) self.minimized = false;
     self.configured = true;
 }
 
@@ -459,7 +494,7 @@ fn onXdgSurfaceConfigure(
     const surface = xdg_surface orelse return;
     c.xdg_surface_ack_configure(surface, serial);
     self.applyPendingConfigure();
-    c.wl_surface_commit(self.surface);
+    self.requestCommit();
 }
 
 const toplevel_listener = c.struct_xdg_toplevel_listener{
@@ -512,8 +547,17 @@ pub fn updateScale(self: *Window) void {
     }
     if (new_scale == self.scale) return;
     self.scale = new_scale;
-    c.wl_surface_set_buffer_scale(self.surface, @intFromFloat(new_scale));
-    c.wl_surface_commit(self.surface);
+    // wl_surface.set_buffer_scale exists since version 3.
+    if (c.wl_surface_get_version(self.surface) >= 3) {
+        const buffer_scale: i32 = if (!std.math.isFinite(new_scale) or new_scale < 1.0)
+            1
+        else if (new_scale >= 2147483648.0)
+            std.math.maxInt(i32)
+        else
+            @intFromFloat(new_scale);
+        c.wl_surface_set_buffer_scale(self.surface, buffer_scale);
+    }
+    self.requestCommit();
     self.backend.pushEvent(.{ .window_scale_changed = .{
         .window_id = self.id,
         .scale = new_scale,

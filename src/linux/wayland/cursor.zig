@@ -38,6 +38,16 @@ pub const Cursor = struct {
         };
     }
 
+    /// Replace the pointer proxy after a seat capability change. The shape
+    /// device is bound to the old pointer and must be recreated lazily.
+    pub fn setPointer(self: *Cursor, pointer: ?*c.struct_wl_pointer) void {
+        if (self.device) |device| {
+            c.wp_cursor_shape_device_v1_destroy(device);
+            self.device = null;
+        }
+        self.pointer = pointer;
+    }
+
     pub fn deinit(self: *Cursor) void {
         for (0..CursorCount) |i| {
             if (self.images[i]) |*slot| slot.image.deinit();
@@ -63,11 +73,10 @@ pub const Cursor = struct {
         state: General.Cursor,
         image: Config.CursorImage,
     ) !void {
-        var new_image = try image_surface.create(self.compositor, self.shm, image);
-        errdefer new_image.deinit();
+        const new_image = try image_surface.create(self.compositor, self.shm, image);
 
         const index: usize = @intCast(@backingInt(state));
-        if (self.images[index]) |*old| old.image.deinit();
+        const old = self.images[index];
         self.images[index] = .{
             .image = new_image,
             .hotspot_x = image.hotspot_x,
@@ -75,7 +84,19 @@ pub const Cursor = struct {
         };
 
         if (state == self.last_shape and self.visible and serial != 0) {
-            try self.applyCurrent(serial);
+            self.applyCurrent(serial) catch |err| {
+                // Restore the previous slot so it is not left pointing at the
+                // image we are about to destroy.
+                self.images[index] = old;
+                var discard = new_image;
+                discard.deinit();
+                return err;
+            };
+        }
+
+        if (old) |slot| {
+            var discard = slot;
+            discard.image.deinit();
         }
     }
 
@@ -83,11 +104,21 @@ pub const Cursor = struct {
     /// system shape is applied again.
     pub fn clearImage(self: *Cursor, serial: u32, state: General.Cursor) !void {
         const index: usize = @intCast(@backingInt(state));
-        if (self.images[index]) |*old| old.image.deinit();
+        const old = self.images[index];
         self.images[index] = null;
 
-        if (state == self.last_shape and self.visible) {
-            try self.applyCurrent(serial);
+        if (state == self.last_shape and self.visible and serial != 0) {
+            self.applyCurrent(serial) catch |err| {
+                // The old surface is still alive, so put it back instead of
+                // leaving the compositor with a dangling cursor image.
+                self.images[index] = old;
+                return err;
+            };
+        }
+
+        if (old) |slot| {
+            var discard = slot;
+            discard.image.deinit();
         }
     }
 

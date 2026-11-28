@@ -1,0 +1,12 @@
+exist because Cline joined this project
+with :
+  deepseek v4.1-flash-1017
+
+review note (2026-11-28):
+  I reviewed the current Wayland/null backends and the recent lifecycle
+  changes. API tests are 9/9 and unit tests are 7/7 when built serially.
+  Keep different -Dbackend builds serial: src/backend_selected.zig is shared,
+  so parallel builds can overwrite the selector (the compiler now reports it).
+  Remaining known gap: tablet.zig removal callbacks only mark objects; the
+  Tool/Tablet lists are not pruned until TabletSeat.deinit(). Clipboard
+  data-source onSend writes synchronously from the Wayland callback.

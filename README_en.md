@@ -28,7 +28,7 @@ This project started as my Wayland learning project. At first I only wanted to u
 Requirements: Zig 0.17.1; on Linux you also need `wayland-scanner`, `wayland-protocols`, `libwayland-client`, and optionally EGL, xkbcommon and wayland-egl.
 
 ```bash
-# Build and run the example (example/draw_trangle.zig)
+# Build and run the example (example/draw_triangle.zig)
 zig build run example
 ```
 
@@ -46,9 +46,9 @@ zig build example
 # API tests for the selected backend (Linux auto selects Wayland)
 zig build test
 
-# Platform-specific API tests
-zig build null
-zig build wayland
+# Backend-specific API tests (one backend per build graph)
+zig build test -Dbackend=null
+zig build test -Dbackend=wayland
 ```
 
 ## Thanks

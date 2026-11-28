@@ -26,6 +26,7 @@ pub const TabletSeat = struct {
     ) !?*TabletSeat {
         if (manager == null or seat == null) return null;
         const object = c.zwp_tablet_manager_v2_get_tablet_seat(manager, seat) orelse return null;
+        errdefer c.zwp_tablet_seat_v2_destroy(object);
 
         const self = try alloc.create(TabletSeat);
         self.* = .{ .alloc = alloc, .sink = sink, .object = object };
@@ -53,12 +54,12 @@ pub const TabletSeat = struct {
         const self: *TabletSeat = @ptrCast(@alignCast(data orelse return));
         const object = id orelse return;
         const tablet = Tablet.init(self.alloc, object) catch |err| {
-            General.reportError(err);
+            self.sink.report(err);
             c.zwp_tablet_v2_destroy(object);
             return;
         };
         self.tablets.append(self.alloc, tablet) catch |err| {
-            General.reportError(err);
+            self.sink.report(err);
             tablet.deinit();
         };
     }
@@ -68,13 +69,13 @@ pub const TabletSeat = struct {
         const self: *TabletSeat = @ptrCast(@alignCast(data orelse return));
         const object = id orelse return;
         const tool = Tool.init(self.alloc, self, object, self.next_pen_id) catch |err| {
-            General.reportError(err);
+            self.sink.report(err);
             c.zwp_tablet_tool_v2_destroy(object);
             return;
         };
         self.next_pen_id +%= 1;
         self.tools.append(self.alloc, tool) catch |err| {
-            General.reportError(err);
+            self.sink.report(err);
             tool.deinit();
         };
     }
@@ -152,12 +153,12 @@ const Tool = struct {
     in_proximity: bool = false,
     down: bool = false,
     removed: bool = false,
-    x: f64 = 0,
-    y: f64 = 0,
-    pressure: f64 = 0,
-    tilt_x: f64 = 0,
-    tilt_y: f64 = 0,
-    rotation: f64 = 0,
+    x: f32 = 0,
+    y: f32 = 0,
+    pressure: f32 = 0,
+    tilt_x: f32 = 0,
+    tilt_y: f32 = 0,
+    rotation: f32 = 0,
 
     fn init(
         alloc: std.mem.Allocator,
@@ -271,30 +272,30 @@ const Tool = struct {
     fn onMotion(data: ?*anyopaque, tool: ?*c.struct_zwp_tablet_tool_v2, x: c.wl_fixed_t, y: c.wl_fixed_t) callconv(.c) void {
         _ = tool;
         const self: *Tool = @ptrCast(@alignCast(data orelse return));
-        self.x = fixedToDouble(x);
-        self.y = fixedToDouble(y);
+        self.x = fixedToFloat(x);
+        self.y = fixedToFloat(y);
         self.emitMoved();
     }
 
     fn onPressure(data: ?*anyopaque, tool: ?*c.struct_zwp_tablet_tool_v2, pressure: u32) callconv(.c) void {
         _ = tool;
         const self: *Tool = @ptrCast(@alignCast(data orelse return));
-        self.pressure = @as(f64, @floatFromInt(pressure)) / 65535.0;
+        self.pressure = @as(f32, @floatFromInt(pressure)) / 65535.0;
         self.emitMoved();
     }
 
     fn onTilt(data: ?*anyopaque, tool: ?*c.struct_zwp_tablet_tool_v2, tilt_x: c.wl_fixed_t, tilt_y: c.wl_fixed_t) callconv(.c) void {
         _ = tool;
         const self: *Tool = @ptrCast(@alignCast(data orelse return));
-        self.tilt_x = fixedToDouble(tilt_x);
-        self.tilt_y = fixedToDouble(tilt_y);
+        self.tilt_x = fixedToFloat(tilt_x);
+        self.tilt_y = fixedToFloat(tilt_y);
         self.emitMoved();
     }
 
     fn onRotation(data: ?*anyopaque, tool: ?*c.struct_zwp_tablet_tool_v2, degrees: c.wl_fixed_t) callconv(.c) void {
         _ = tool;
         const self: *Tool = @ptrCast(@alignCast(data orelse return));
-        self.rotation = fixedToDouble(degrees);
+        self.rotation = fixedToFloat(degrees);
         self.emitMoved();
     }
 
@@ -398,8 +399,8 @@ const Tool = struct {
     }
 };
 
-fn fixedToDouble(value: c.wl_fixed_t) f64 {
-    return @as(f64, @floatFromInt(value)) / 256.0;
+fn fixedToFloat(value: c.wl_fixed_t) f32 {
+    return @as(f32, @floatFromInt(value)) / 256.0;
 }
 
 fn mapButton(button: u32) u8 {

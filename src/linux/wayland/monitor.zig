@@ -25,7 +25,7 @@ done: bool = false,
 pub fn init(alloc: std.mem.Allocator, backend: *Backend, display: *Display, global: Display.Global) ?*Monitor {
     const output = display.bindOutput(global) orelse return null;
     const self = alloc.create(Monitor) catch |err| {
-        General.reportError(err);
+        backend.reportError(err);
         c.wl_output_release(output);
         return null;
     };
@@ -133,7 +133,7 @@ fn onName(data: ?*anyopaque, output: ?*c.struct_wl_output, name: [*c]const u8) c
     if (name == null) return;
     const text = std.mem.span(@as([*:0]const u8, @ptrCast(name)));
     const copy = self.alloc.dupe(u8, text) catch |err| {
-        General.reportError(err);
+        self.backend.reportError(err);
         return;
     };
     if (self.name_buf) |old| self.alloc.free(old);

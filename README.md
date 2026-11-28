@@ -28,7 +28,7 @@ zcwl 是一个用 Zig 编写的跨平台库——尽管目前它还不跨平台�
 依赖：Zig 0.17.1；Linux 上需要 `wayland-scanner`、`wayland-protocols`、`libwayland-client`，以及可选的 EGL、xkbcommon 和 wayland-egl。
 
 ```bash
-# 编译并运行示例（example/draw_trangle.zig）
+# 编译并运行示例（example/draw_triangle.zig）
 zig build run example
 ```
 
@@ -46,9 +46,9 @@ zig build example
 # 当前后端 API 测试（Linux auto 默认使用 Wayland）
 zig build test
 
-# 指定平台 API 测试
-zig build null
-zig build wayland
+# 指定后端 API 测试（每个构建图只编译一个后端）
+zig build test -Dbackend=null
+zig build test -Dbackend=wayland
 ```
 
 ## 感谢

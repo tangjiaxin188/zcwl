@@ -59,6 +59,8 @@ pub const Clipboard = struct {
     pending_reads: bool = false,
 
     drag_offer: ?*c.struct_wl_data_offer = null,
+    /// Set by the offer's `action` event; `finish` is illegal before it.
+    drag_action: u32 = 0,
     drag_window: ?u32 = null,
     drag_x: f32 = 0,
     drag_y: f32 = 0,
@@ -106,7 +108,14 @@ pub const Clipboard = struct {
         self.clearDrag();
         self.clearSource();
         self.clearDragSource();
-        if (self.device) |device| c.wl_data_device_release(device);
+        if (self.device) |device| {
+            // wl_data_device.release is a request since version 3.
+            if (c.wl_data_device_get_version(device) >= 3) {
+                c.wl_data_device_release(device);
+            } else {
+                c.wl_data_device_destroy(device);
+            }
+        }
         self.mimes.deinit(self.alloc);
         self.pending_mimes.deinit(self.alloc);
         self.reads.deinit(self.alloc);
@@ -158,10 +167,10 @@ pub const Clipboard = struct {
             };
         }
 
-        self.clearSource();
-
         const source = c.wl_data_device_manager_create_data_source(self.manager) orelse
             return error.Uninitialized;
+        // Keep the old selection alive if creating the new source failed above.
+        self.clearSource();
         self.source = source;
         self.source_items = prepared;
         _ = c.wl_data_source_add_listener(source, &source_listener, self);
@@ -177,12 +186,13 @@ pub const Clipboard = struct {
         paths: []const []const u8,
         serial: u32,
     ) !void {
-        if (!self.initialized) return error.Uninitialized;
+        if (!self.initialized) return error.Unsupported;
         if (serial == 0) return error.WouldBlock;
         if (paths.len == 0) return error.InvalidArgument;
 
         const uris = try buildUriList(self.alloc, paths);
-        errdefer self.alloc.free(uris);
+        // `startDragItems` copies the payload; this URI list is temporary.
+        defer self.alloc.free(uris);
 
         const items = [_]General.ClipboardItem{
             .{ .mime = uri_mime, .data = uris },
@@ -218,9 +228,10 @@ pub const Clipboard = struct {
             };
         }
 
-        self.clearDragSource();
         const source = c.wl_data_device_manager_create_data_source(self.manager) orelse
             return error.Uninitialized;
+        // Keep the old drag source alive if creating the new one failed.
+        self.clearDragSource();
         self.drag_source = source;
         self.drag_source_items = prepared;
         _ = c.wl_data_source_add_listener(source, &source_listener, self);
@@ -293,13 +304,13 @@ pub const Clipboard = struct {
             const n = c.read(read.fd, &chunk, chunk.len);
             if (n > 0) {
                 if (read.buf.items.len + @as(usize, @intCast(n)) > max_read_bytes) {
-                    General.reportError(error.ClipboardTooLarge);
+                    self.sink.report(error.ClipboardTooLarge);
                     var removed = self.reads.orderedRemove(i);
                     removed.deinit(self.alloc);
                     continue;
                 }
                 read.buf.appendSlice(self.alloc, chunk[0..@intCast(n)]) catch |err| {
-                    General.reportError(err);
+                    self.sink.report(err);
                     var removed = self.reads.orderedRemove(i);
                     removed.deinit(self.alloc);
                     continue;
@@ -311,12 +322,12 @@ pub const Clipboard = struct {
             var removed = self.reads.orderedRemove(i);
             if (n == 0) {
                 const data = removed.buf.toOwnedSlice(self.alloc) catch |err| {
-                    General.reportError(err);
+                    self.sink.report(err);
                     removed.deinit(self.alloc);
                     continue;
                 };
                 self.cache.append(self.alloc, .{ .mime = removed.mime, .data = data }) catch |err| {
-                    General.reportError(err);
+                    self.sink.report(err);
                     self.alloc.free(removed.mime);
                     self.alloc.free(data);
                     _ = c.close(removed.fd);
@@ -325,9 +336,11 @@ pub const Clipboard = struct {
                 };
                 _ = c.close(removed.fd);
                 removed.buf.deinit(self.alloc);
-                if (self.offer) |offer| c.wl_data_offer_finish(offer);
+                // `wl_data_offer.finish` is only valid for drag-and-drop
+                // offers (and only since version 3). Calling it on a
+                // clipboard selection offer is a protocol error.
             } else {
-                General.reportError(error.ClipboardReadFailed);
+                self.sink.report(error.ClipboardReadFailed);
                 removed.deinit(self.alloc);
             }
         }
@@ -349,25 +362,25 @@ pub const Clipboard = struct {
         const n = c.read(fd, &chunk, chunk.len);
         if (n > 0) {
             if (self.drag_read_buf.items.len + @as(usize, @intCast(n)) > max_read_bytes) {
-                General.reportError(error.ClipboardTooLarge);
+                self.sink.report(error.ClipboardTooLarge);
                 self.clearDragOffer();
                 return;
             }
             self.drag_read_buf.appendSlice(self.alloc, chunk[0..@intCast(n)]) catch |err| {
-                General.reportError(err);
+                self.sink.report(err);
                 self.clearDragOffer();
             };
             return;
         }
 
         if (n < 0) {
-            General.reportError(error.ClipboardReadFailed);
+            self.sink.report(error.ClipboardReadFailed);
             self.clearDragOffer();
             return;
         }
 
         const data = self.drag_read_buf.toOwnedSlice(self.alloc) catch |err| {
-            General.reportError(err);
+            self.sink.report(err);
             self.clearDragOffer();
             return;
         };
@@ -377,14 +390,19 @@ pub const Clipboard = struct {
 
         self.drag_drop_uris.clearRetainingCapacity();
         self.drag_drop_uris.appendSlice(self.alloc, data) catch |err| {
-            General.reportError(err);
+            self.sink.report(err);
             self.alloc.free(data);
             self.clearDragOffer();
             return;
         };
         self.alloc.free(data);
 
-        if (self.drag_offer) |offer| c.wl_data_offer_finish(offer);
+        if (self.drag_offer) |offer| {
+            // `finish` requires offer version >= 3 and a chosen action.
+            if (c.wl_data_offer_get_version(offer) >= 3 and self.drag_action != 0) {
+                c.wl_data_offer_finish(offer);
+            }
+        }
         self.clearDragOffer();
         if (window_id) |id| {
             self.sink.push(.{ .file_drop = .{
@@ -400,7 +418,7 @@ pub const Clipboard = struct {
         self.drag_mime_slices.clearRetainingCapacity();
         for (self.drag_mimes.items) |mime| {
             self.drag_mime_slices.append(self.alloc, mime.text) catch |err| {
-                General.reportError(err);
+                self.sink.report(err);
                 return;
             };
         }
@@ -418,7 +436,7 @@ pub const Clipboard = struct {
             if (findCached(self, mime.text) != null or findRead(self, mime.text) != null) continue;
 
             const read_mime = dupeZ(self.alloc, mime.text) catch |err| {
-                General.reportError(err);
+                self.sink.report(err);
                 continue;
             };
             var fds: [2]c_int = undefined;
@@ -430,7 +448,7 @@ pub const Clipboard = struct {
             c.wl_data_offer_receive(offer, mime.text.ptr, fds[1]);
             _ = c.close(fds[1]);
             self.reads.append(self.alloc, .{ .mime = read_mime, .fd = fds[0] }) catch |err| {
-                General.reportError(err);
+                self.sink.report(err);
                 _ = c.close(fds[0]);
                 self.alloc.free(read_mime);
             };
@@ -469,6 +487,7 @@ pub const Clipboard = struct {
         self.drag_mime = null;
         if (self.drag_offer) |offer| c.wl_data_offer_destroy(offer);
         self.drag_offer = null;
+        self.drag_action = 0;
         self.drag_window = null;
         self.drag_x = 0;
         self.drag_y = 0;
@@ -557,7 +576,7 @@ pub const Clipboard = struct {
             }
         }
         self.drag_mime = dupeZ(self.alloc, selected) catch |err| {
-            General.reportError(err);
+            self.sink.report(err);
             return;
         };
     }
@@ -685,11 +704,11 @@ fn onOffer(data: ?*anyopaque, offer: ?*c.struct_wl_data_offer, mime_type: [*c]co
     const mime = std.mem.span(@as([*:0]const u8, @ptrCast(mime_type)));
     if (containsMime(self.pending_mimes.items, mime)) return;
     const copy = dupeZ(self.alloc, mime) catch |err| {
-        General.reportError(err);
+        self.sink.report(err);
         return;
     };
     self.pending_mimes.append(self.alloc, .{ .text = copy }) catch |err| {
-        General.reportError(err);
+        self.sink.report(err);
         self.alloc.free(copy);
     };
 }
@@ -724,7 +743,7 @@ fn onSend(data: ?*anyopaque, source: ?*c.struct_wl_data_source, mime_type: [*c]c
         while (written < item.data.len) {
             const n = c.write(fd, item.data[written..].ptr, item.data.len - written);
             if (n < 0) {
-                General.reportError(error.ClipboardWriteFailed);
+                self.sink.report(error.ClipboardWriteFailed);
                 break;
             }
             if (n == 0) break;
@@ -809,7 +828,7 @@ fn onDataDrop(data: ?*anyopaque, device: ?*c.struct_wl_data_device) callconv(.c)
 
     var fds: [2]c_int = undefined;
     if (c.pipe(&fds) != 0) {
-        General.reportError(error.ClipboardReadFailed);
+        self.sink.report(error.ClipboardReadFailed);
         self.clearDragOffer();
         return;
     }
@@ -829,9 +848,8 @@ fn onOfferSourceActions(data: ?*anyopaque, offer: ?*c.struct_wl_data_offer, sour
 }
 
 fn onOfferAction(data: ?*anyopaque, offer: ?*c.struct_wl_data_offer, dnd_action: u32) callconv(.c) void {
-    _ = data;
-    _ = offer;
-    _ = dnd_action;
+    const self: *Clipboard = @ptrCast(@alignCast(data orelse return));
+    if (self.drag_offer == offer) self.drag_action = dnd_action;
 }
 
 fn onSourceTarget(data: ?*anyopaque, source: ?*c.struct_wl_data_source, mime_type: [*c]const u8) callconv(.c) void {

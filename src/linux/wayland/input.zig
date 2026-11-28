@@ -73,6 +73,11 @@ pub fn init(
         self.xkb_context = x.contextNew(xkb_mod.CONTEXT_NO_FLAGS);
         if (self.xkb_context == null) return error.XkbContextFailed;
     }
+    errdefer {
+        if (xkb) |x| {
+            if (self.xkb_context) |ctx| x.contextUnref(ctx);
+        }
+    }
     self.tablet = try tablet_mod.TabletSeat.init(alloc, tablet_manager, seat, sink);
     if (seat) |s| {
         _ = c.wl_seat_add_listener(s, &seat_listener, self);
@@ -82,9 +87,9 @@ pub fn init(
 
 pub fn uninit(self: *Input) void {
     if (self.tablet) |value| value.deinit();
-    if (self.touch) |v| c.wl_touch_release(v);
-    if (self.keyboard) |v| c.wl_keyboard_release(v);
-    if (self.pointer) |v| c.wl_pointer_release(v);
+    if (self.touch) |v| releaseTouch(v);
+    if (self.keyboard) |v| releaseKeyboard(v);
+    if (self.pointer) |v| releasePointer(v);
     if (self.xkb) |x| {
         if (self.xkb_state) |v| x.stateUnref(v);
         if (self.xkb_keymap) |v| x.keymapUnref(v);
@@ -135,9 +140,15 @@ fn onCapabilities(data: ?*anyopaque, seat: ?*c.struct_wl_seat, capabilities: u32
         if (self.pointer == null) {
             self.pointer = c.wl_seat_get_pointer(seat);
             if (self.pointer) |pointer| _ = c.wl_pointer_add_listener(pointer, &pointer_listener, self);
+            self.sink.pointerChanged(self.pointer);
         }
     } else if (self.pointer) |pointer| {
-        c.wl_pointer_release(pointer);
+        if (self.pointer_window) |window_id| {
+            self.sink.push(.{ .mouse_left = .{ .window_id = window_id } });
+            self.pointer_window = null;
+        }
+        self.sink.pointerChanged(null);
+        releasePointer(pointer);
         self.pointer = null;
     }
 
@@ -147,8 +158,13 @@ fn onCapabilities(data: ?*anyopaque, seat: ?*c.struct_wl_seat, capabilities: u32
             if (self.keyboard) |keyboard| _ = c.wl_keyboard_add_listener(keyboard, &keyboard_listener, self);
         }
     } else if (self.keyboard) |keyboard| {
+        if (self.keyboard_window) |window_id| {
+            self.sink.push(.{ .window_focus_lost = .{ .window_id = window_id } });
+            self.keyboard_window = null;
+            self.sink.focus(null);
+        }
         self.keys_down = .empty;
-        c.wl_keyboard_release(keyboard);
+        releaseKeyboard(keyboard);
         self.keyboard = null;
     }
 
@@ -159,8 +175,8 @@ fn onCapabilities(data: ?*anyopaque, seat: ?*c.struct_wl_seat, capabilities: u32
         }
     } else if (self.touch) |touch| {
         self.finishTouch();
+        releaseTouch(touch);
         self.touch = null;
-        c.wl_touch_release(touch);
     }
 }
 
@@ -344,7 +360,7 @@ fn onKeyboardKeymap(
         fd,
         0,
     ) catch |err| {
-        General.reportError(err);
+        self.sink.report(err);
         _ = c.close(fd);
         return;
     };
@@ -358,11 +374,11 @@ fn onKeyboardKeymap(
         xkb_mod.KEYMAP_FORMAT_TEXT_V1,
         xkb_mod.KEYMAP_COMPILE_NO_FLAGS,
     ) orelse {
-        General.reportError(error.WaylandKeymapFailed);
+        self.sink.report(error.WaylandKeymapFailed);
         return;
     };
     const state = x.stateNew(keymap) orelse {
-        General.reportError(error.WaylandKeymapFailed);
+        self.sink.report(error.WaylandKeymapFailed);
         x.keymapUnref(keymap);
         return;
     };
@@ -588,9 +604,9 @@ fn onTouchDown(
     y: c.wl_fixed_t,
 ) callconv(.c) void {
     _ = touch;
-    _ = serial;
     _ = time;
     const self: *Input = @ptrCast(@alignCast(data orelse return));
+    if (serial > self.last_serial) self.last_serial = serial;
     if (self.touch_active_id != null) return;
 
     self.touch_active_id = id;
@@ -623,9 +639,9 @@ fn onTouchUp(
     id: i32,
 ) callconv(.c) void {
     _ = touch;
-    _ = serial;
     _ = time;
     const self: *Input = @ptrCast(@alignCast(data orelse return));
+    if (serial > self.last_serial) self.last_serial = serial;
     if (self.touch_active_id != id) return;
     self.finishTouch();
 }
@@ -678,4 +694,30 @@ fn onTouchOrientation(data: ?*anyopaque, touch: ?*c.struct_wl_touch, id: i32, or
     _ = touch;
     _ = id;
     _ = orientation;
+}
+
+/// `release` is a request since wl_pointer/wl_keyboard/wl_touch version 3;
+/// older compositors only support the client-side `destroy`.
+fn releasePointer(pointer: *c.struct_wl_pointer) void {
+    if (c.wl_pointer_get_version(pointer) >= 3) {
+        c.wl_pointer_release(pointer);
+    } else {
+        c.wl_pointer_destroy(pointer);
+    }
+}
+
+fn releaseKeyboard(keyboard: *c.struct_wl_keyboard) void {
+    if (c.wl_keyboard_get_version(keyboard) >= 3) {
+        c.wl_keyboard_release(keyboard);
+    } else {
+        c.wl_keyboard_destroy(keyboard);
+    }
+}
+
+fn releaseTouch(touch: *c.struct_wl_touch) void {
+    if (c.wl_touch_get_version(touch) >= 3) {
+        c.wl_touch_release(touch);
+    } else {
+        c.wl_touch_destroy(touch);
+    }
 }

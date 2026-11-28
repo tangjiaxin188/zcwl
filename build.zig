@@ -39,9 +39,10 @@ pub fn build(b: *std.Build) void {
         "wayland-protocols installation directory (default: /usr/share/wayland-protocols)",
     ) orelse "/usr/share/wayland-protocols";
 
-    // Only the selected backend is imported. The generated selector lives in
-    // the source tree (gitignored) so its relative imports resolve inside the
-    // same module as Backend.zig.
+    // Generate a selector containing exactly one backend import. A static
+    // comptime switch is not equivalent: Zig still resolves/parses imports in
+    // unselected arms, which breaks fresh headless builds when the Wayland
+    // protocol headers have not been generated.
     const backend_selector = addBackendSelector(b, backend);
 
     // Wayland protocol sources are only needed by the Wayland backend.
@@ -51,21 +52,8 @@ pub fn build(b: *std.Build) void {
         null;
     if (gen_protocols) |gen| b.getInstallStep().dependOn(gen);
     b.getInstallStep().dependOn(backend_selector);
-    const wayland_active = backend == .wayland;
 
-    const mod = b.addModule("zcwl", .{
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const mod_opts = b.addOptions();
-    mod_opts.addOption(Backend, "backend", backend);
-    mod.addOptions("build_options", mod_opts);
-
-    if (wayland_active) {
-        configureWaylandModule(b, mod);
-    }
+    const mod = createZcwlModule(b, target, optimize, backend);
 
     const mod_tests = b.addTest(.{
         .root_module = mod,
@@ -83,7 +71,7 @@ pub fn build(b: *std.Build) void {
     // Example executable (source at <project>/example). `zig build run example`
     // both builds and runs it.
     const example_mod = b.createModule(.{
-        .root_source_file = b.path("example/draw_trangle.zig"),
+        .root_source_file = b.path("example/draw_triangle.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -104,42 +92,79 @@ pub fn build(b: *std.Build) void {
     const example_step = b.step("example", "Build the example");
     example_step.dependOn(&example_exe.step);
 
-    // Per-backend public API suites. `zig build test` runs the API suite for
-    // the selected backend; `zig build test-unit` runs library unit tests.
-    // `zig build null` / `zig build wayland` run one specific suite.
-    const run_null_api = addApiTest(b, target, optimize, "test/api_test.zig", .null, gen_protocols, backend_selector);
-    const null_step = b.step("null", "Run null backend API tests");
-    null_step.dependOn(&run_null_api.step);
+    // One API suite per build graph. A second zcwl module with a different
+    // backend would read the same generated selector file and compile the
+    // wrong backend (and with the wrong linker/libc setup). Select the
+    // backend with `-Dbackend=null|wayland` instead.
+    const run_api = addApiTest(b, target, optimize, "test/api_test.zig", backend, gen_protocols, backend_selector);
+    test_step.dependOn(&run_api.step);
 
-    var run_wayland_api: ?*std.Build.Step.Run = null;
-    if (wayland_active) {
-        run_wayland_api = addApiTest(b, target, optimize, "test/api_test.zig", .wayland, gen_protocols, backend_selector);
-        const wayland_step = b.step("wayland", "Run Wayland backend API tests");
-        wayland_step.dependOn(&run_wayland_api.?.step);
+    const null_step = b.step("null", "API tests for the null backend (-Dbackend=null)");
+    if (backend == .null) {
+        null_step.dependOn(&run_api.step);
+    } else {
+        null_step.dependOn(&b.addFail("zig build null requires -Dbackend=null").step);
     }
 
-    // `test` already includes the selected backend's API suite; on Linux that
-    // is Wayland, otherwise fall back to the null suite.
-    if (backend == .wayland and run_wayland_api != null) {
-        test_step.dependOn(&run_wayland_api.?.step);
+    const wayland_step = b.step("wayland", "API tests for the Wayland backend (-Dbackend=wayland)");
+    if (backend == .wayland) {
+        wayland_step.dependOn(&run_api.step);
     } else {
-        test_step.dependOn(&run_null_api.step);
+        wayland_step.dependOn(&b.addFail("zig build wayland requires -Dbackend=wayland").step);
     }
 }
 
+/// Generate `src/backend_selected.zig` with exactly one backend import so
+/// unselected backends are neither resolved nor analyzed. The file is
+/// gitignored and only ever contains a single import line.
+///
+/// `name` lets `Backend.zig` detect a selector overwritten by a concurrent
+/// build with a different `-Dbackend`. Writes are atomic so a reader never sees
+/// a partially written file.
 fn addBackendSelector(b: *std.Build, backend: Backend) *std.Build.Step {
     const out = b.root.joinString(b.allocator, "src/backend_selected.zig") catch @panic("OOM");
     const import_path = switch (backend) {
         .wayland => "linux/wayland/backend.zig",
         else => "null/backend.zig",
     };
-    const cmd = b.fmt(
-        "printf '%s\\n' '// Generated by build.zig. Do not edit.' 'pub const impl = @import(\"{s}\");' > '{s}'",
-        .{ import_path, out },
+    const content = b.fmt(
+        "// Generated by build.zig. Do not edit.\n" ++
+            "pub const name = \"{s}\";\n" ++
+            "pub const impl = @import(\"{s}\");\n",
+        .{ @tagName(backend), import_path },
     );
-    const run = b.addSystemCommand(&.{ "sh", "-c", cmd });
+    // Pass the content and path as positional arguments so paths containing
+    // spaces or quotes are not re-parsed by the shell.
+    const run = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        "trap 'rm -f \"$2.tmp.$$\"' EXIT; printf '%s' \"$1\" > \"$2.tmp.$$\" && mv \"$2.tmp.$$\" \"$2\"",
+        "sh",
+        content,
+        out,
+    });
     run.has_side_effects = true;
     return &run.step;
+}
+
+/// Build the `zcwl` module; the backend selector is generated by
+/// `addBackendSelector` before compilation.
+fn createZcwlModule(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    backend: Backend,
+) *std.Build.Module {
+    const zcwl = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const opts = b.addOptions();
+    opts.addOption(Backend, "backend", backend);
+    zcwl.addOptions("build_options", opts);
+    if (backend == .wayland) configureWaylandModule(b, zcwl);
+    return zcwl;
 }
 
 /// Generate Wayland client headers/private code and the translate-c bindings
@@ -160,15 +185,23 @@ fn addWaylandProtocols(b: *std.Build, protocols_dir: []const u8) *std.Build.Step
         const header = b.pathJoin(&.{ out_dir, b.fmt("{s}-client.h", .{proto.name}) });
         const code = b.pathJoin(&.{ out_dir, b.fmt("{s}-protocol.c", .{proto.name}) });
 
-        const gen_header = b.addSystemCommand(&.{ "wayland-scanner", "client-header" });
-        gen_header.addArg(xml);
-        gen_header.addArg(header);
+        // Atomic temp+rename: concurrent builds of the same backend write
+        // identical content, so readers never see a partial file.
+        const gen_header = b.addSystemCommand(&.{
+            "sh",                                                                                                    "-c",
+            "trap 'rm -f \"$3.tmp.$$\"' EXIT; \"$1\" client-header \"$2\" \"$3.tmp.$$\" && mv \"$3.tmp.$$\" \"$3\"", "sh",
+            "wayland-scanner",                                                                                       xml,
+            header,
+        });
         gen_header.has_side_effects = true;
         gen_header.step.dependOn(&mkdir.step);
 
-        const gen_code = b.addSystemCommand(&.{ "wayland-scanner", "private-code" });
-        gen_code.addArg(xml);
-        gen_code.addArg(code);
+        const gen_code = b.addSystemCommand(&.{
+            "sh",                                                                                                   "-c",
+            "trap 'rm -f \"$3.tmp.$$\"' EXIT; \"$1\" private-code \"$2\" \"$3.tmp.$$\" && mv \"$3.tmp.$$\" \"$3\"", "sh",
+            "wayland-scanner",                                                                                      xml,
+            code,
+        });
         gen_code.has_side_effects = true;
         gen_code.step.dependOn(&mkdir.step);
 
@@ -181,11 +214,12 @@ fn addWaylandProtocols(b: *std.Build, protocols_dir: []const u8) *std.Build.Step
     // This runs after all generated headers exist.
     const bindings_zig = b.pathJoin(&.{ out_dir, "bindings.zig" });
     const bindings_h = b.root.joinString(b.allocator, "src/linux/wayland/bindings.h") catch @panic("OOM");
-    const translate_cmd = b.fmt(
-        "'{s}' translate-c -I '{s}' '{s}' > '{s}'",
-        .{ b.graph.zig_exe, out_dir, bindings_h, bindings_zig },
-    );
-    const translate = b.addSystemCommand(&.{ "sh", "-c", translate_cmd });
+    const translate = b.addSystemCommand(&.{
+        "sh",                                                                                                              "-c",
+        "trap 'rm -f \"$4.tmp.$$\"' EXIT; \"$1\" translate-c -I \"$2\" \"$3\" > \"$4.tmp.$$\" && mv \"$4.tmp.$$\" \"$4\"", "sh",
+        b.graph.zig_exe,                                                                                                   out_dir,
+        bindings_h,                                                                                                        bindings_zig,
+    });
     translate.has_side_effects = true;
     for (header_steps.items) |step| translate.step.dependOn(step);
     gen_step.dependOn(&translate.step);
@@ -227,14 +261,11 @@ fn resolveBackend(target: std.Build.ResolvedTarget, requested: BackendChoice) Ba
     };
 
     switch (backend) {
-        .wayland, .x11, .both => {
-            if (os != .linux) @panic("wayland/x11/both backends require a Linux target");
+        .wayland => {
+            if (os != .linux) std.process.fatal("wayland backend requires a Linux target", .{});
         },
-        .windows => {
-            if (os != .windows) @panic("-Dbackend=windows requires a Windows target");
-        },
-        .macos => {
-            if (os != .macos) @panic("-Dbackend=macos requires a macOS target");
+        .x11, .both, .windows, .macos => {
+            std.process.fatal("selected backend is not implemented yet; use -Dbackend=null or -Dbackend=wayland", .{});
         },
         .null => {},
     }
@@ -250,15 +281,7 @@ fn addApiTest(
     gen_protocols: ?*std.Build.Step,
     backend_selector: *std.Build.Step,
 ) *std.Build.Step.Run {
-    const opts = b.addOptions();
-    opts.addOption(Backend, "backend", backend);
-
-    const zcwl = b.createModule(.{
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    zcwl.addOptions("build_options", opts);
+    const zcwl = createZcwlModule(b, target, optimize, backend);
 
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -271,9 +294,6 @@ fn addApiTest(
 
     tests.step.dependOn(backend_selector);
     if (gen_protocols) |gen| tests.step.dependOn(gen);
-    if (backend == .wayland) {
-        configureWaylandModule(b, zcwl);
-    }
 
     const run = b.addRunArtifact(tests);
     // Show the test runner output (and always execute, so `zig build test null`

@@ -40,6 +40,7 @@ pub const NativeContext = ContextImpl.NativeContext;
 pub const NativeWindow = General.NativeWindow;
 
 alloc: std.mem.Allocator,
+reporter: General.Reporter,
 display: *Display,
 loader: loader_mod.Loader,
 input: *Input,
@@ -55,7 +56,7 @@ next_id: u32 = 1,
 app_id: []u8,
 
 pub fn init(alloc: std.mem.Allocator, config: Config.AppConfig) !*Backend {
-    const display = try Display.init(alloc);
+    const display = try Display.init(alloc, config.reporter);
     errdefer display.uninit();
 
     const app_id = try dupeZ(alloc, if (config.application_id.len == 0) "zcwl-app" else config.application_id);
@@ -65,6 +66,7 @@ pub fn init(alloc: std.mem.Allocator, config: Config.AppConfig) !*Backend {
     errdefer alloc.destroy(self);
     self.* = .{
         .alloc = alloc,
+        .reporter = config.reporter,
         .display = display,
         .loader = loader_mod.Loader.init(),
         .input = undefined,
@@ -85,9 +87,14 @@ pub fn init(alloc: std.mem.Allocator, config: Config.AppConfig) !*Backend {
         self.queue.deinit();
         return err;
     };
+    // Initialize the cursor before the roundtrip: capability callbacks can
+    // fire during it and need a live Cursor to update the pointer proxy.
+    self.cursor = Cursor.init(display.cursor_shape_manager, null, display.compositor, display.shm);
+
     // A second roundtrip delivers wl_seat capabilities and creates the
     // pointer/keyboard objects.
     display.roundtrip();
+    self.cursor.setPointer(self.input.pointerDevice());
 
     self.clipboard = Clipboard.init(alloc, self.sink(), display.data_device_manager, display.seat);
     self.clipboard.rebind();
@@ -96,12 +103,6 @@ pub fn init(alloc: std.mem.Allocator, config: Config.AppConfig) !*Backend {
         self.ime = Ime.init(manager, display.seat, self.sink());
         if (self.ime) |*ime| ime.rebind();
     }
-    self.cursor = Cursor.init(
-        display.cursor_shape_manager,
-        self.input.pointerDevice(),
-        display.compositor,
-        display.shm,
-    );
 
     for (display.outputs.items) |global| {
         if (Monitor.init(alloc, self, display, global)) |monitor| {
@@ -111,7 +112,7 @@ pub fn init(alloc: std.mem.Allocator, config: Config.AppConfig) !*Backend {
     // Deliver wl_output geometry/mode/scale/name before the first query.
     display.roundtrip();
 
-    General.reportInfo(.{
+    config.reporter.reportInfo(.{
         .os = builtin.os.tag,
         .arch = builtin.cpu.arch,
         .backend = "wayland",
@@ -166,6 +167,11 @@ pub fn initContext(
 pub fn pollEvent(self: *Backend, ev: *Event.Core) bool {
     self.clipboard.last_serial = self.input.lastSerial();
     self.display.pump();
+    self.drainRemovedOutputs();
+    if (self.display.outputs_dirty) {
+        self.display.outputs_dirty = false;
+        self.syncOutputs();
+    }
     self.clipboard.last_serial = self.input.lastSerial();
     self.clipboard.poll();
 
@@ -178,7 +184,42 @@ pub fn pollEvent(self: *Backend, ev: *Event.Core) bool {
 }
 
 pub fn pushEvent(self: *Backend, ev: Event.Core) void {
-    if (!self.queue.push(ev)) General.reportError(error.OutOfMemory);
+    if (!self.queue.push(ev)) self.reportError(error.OutOfMemory);
+}
+
+/// Reconcile monitors after `wl_registry.global_remove` events collected by
+/// `Display`. Only runs when an output was actually removed.
+fn drainRemovedOutputs(self: *Backend) void {
+    while (self.display.removed_outputs.pop()) |name| {
+        var i: usize = 0;
+        while (i < self.monitors.items.len) : (i += 1) {
+            if (self.monitors.items[i].global_name != name) continue;
+            const monitor = self.monitors.orderedRemove(i);
+            for (self.windows.items) |window| window.forgetOutput(monitor.output);
+            monitor.uninit();
+            break;
+        }
+    }
+}
+
+/// Create monitors for `wl_output` globals that appeared after `init` (or
+/// during it after the initial pass). Runs only when `Display` reports a
+/// change, so the normal event loop pays no scan cost.
+fn syncOutputs(self: *Backend) void {
+    for (self.display.outputs.items) |global| {
+        var found = false;
+        for (self.monitors.items) |monitor| {
+            if (monitor.global_name == global.name) {
+                found = true;
+                break;
+            }
+        }
+        if (found) continue;
+
+        if (Monitor.init(self.alloc, self, self.display, global)) |monitor| {
+            self.monitors.append(self.alloc, monitor) catch monitor.uninit();
+        }
+    }
 }
 
 pub fn getVulkanInstanceExtensions(self: *Backend) []const [*:0]const u8 {
@@ -192,10 +233,9 @@ const vulkan_extensions = [_][*:0]const u8{
 };
 
 pub fn getInfo(self: *Backend) General.BackendInfo {
-    _ = self;
     return .{
         .platform = .wayland,
-        .context_creator = .egl,
+        .context_creator = if (self.loader.egl != null) .egl else .none,
         .os = builtin.os.tag,
         .arch = builtin.cpu.arch,
     };
@@ -248,7 +288,33 @@ fn sink(self: *Backend) Sink {
         .surface_window_fn = surfaceWindowThunk,
         .apply_cursor_fn = applyCursorThunk,
         .focus_fn = focusThunk,
+        .ime_allowed_fn = imeAllowedThunk,
+        .report_fn = reportThunk,
+        .pointer_changed_fn = pointerChangedThunk,
     };
+}
+
+fn imeAllowedThunk(ctx: *anyopaque, window_id: u32) bool {
+    const self: *Backend = @ptrCast(@alignCast(ctx));
+    const window = self.windowById(window_id) orelse return false;
+    return window.ime_allowed;
+}
+
+/// Keep the cursor's pointer proxy in sync with seat capabilities.
+fn pointerChangedThunk(ctx: *anyopaque, pointer: ?*c.struct_wl_pointer) void {
+    const self: *Backend = @ptrCast(@alignCast(ctx));
+    self.cursor.setPointer(pointer);
+}
+
+/// Forward diagnostics from subsystems that only hold a `Sink`.
+fn reportThunk(ctx: *anyopaque, err: anyerror) void {
+    const self: *Backend = @ptrCast(@alignCast(ctx));
+    self.reportError(err);
+}
+
+/// Used by backend-owned modules that hold a `*Backend`.
+pub fn reportError(self: *Backend, err: anyerror) void {
+    self.reporter.reportError(err);
 }
 
 fn pushThunk(ctx: *anyopaque, ev: Event.Core) void {
@@ -261,11 +327,11 @@ fn textThunk(ctx: *anyopaque, window_id: u32, text: []const u8) void {
     // copied only to keep the event alive until Backend.uninit.
     const self: *Backend = @ptrCast(@alignCast(ctx));
     const copy = self.alloc.dupe(u8, text) catch |err| {
-        General.reportError(err);
+        self.reportError(err);
         return;
     };
     self.owned_text.append(self.alloc, copy) catch |err| {
-        General.reportError(err);
+        self.reportError(err);
         self.alloc.free(copy);
         return;
     };

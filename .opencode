@@ -1,0 +1,25 @@
+exist because opencode joined this project
+with :
+    hy4-flash
+    deepseek v4.1-flash-free
+    deepseek v4.1-flash-1017
+
+---
+zcwl review/fix handoff (all changes uncommitted)
+
+Verification: zig fmt --check, zig build test (null + wayland),
+test-unit 7/7, ReleaseSafe, example run, and fresh null build all pass.
+
+Key decisions:
+- startDragFiles without a data device -> Unsupported (matches public docs
+  and the null backend; Uninitialized is reserved for clipboard get/set).
+- setSize(0) is rejected; fullscreen uses setFullscreen().
+- Window structs are retained until App.uninit so repeated destroy() is safe.
+- Cursor images are application-global per state; IME enablement is per-window.
+
+Known limits: wl_seat hotplug, tablet entry removal, eglTerminate,
+window_minimized event (xdg has no such state), click_count, blocking
+clipboard send, and cross-backend parallel builds needing serialization.
+
+Generated/gitignored: src/backend_selected.zig and
+src/linux/wayland/protocols/.

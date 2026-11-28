@@ -45,16 +45,17 @@ pub const MouseButtonUp = struct { window_id: u32, button: MouseButton, mods: Mo
 pub const MouseScrolled = struct { window_id: u32, dx: f32, dy: f32, mods: Mods };
 
 /// Pen position in logical surface coordinates; `pressure` is 0..1;
-/// `tilt_x`/`tilt_y` and `rotation` are degrees.
+/// `tilt_x`/`tilt_y` and `rotation` are degrees. Coordinates use the same
+/// `f32` type as mouse events.
 pub const PenState = struct {
     window_id: u32,
     pen_id: u32,
-    x: f64,
-    y: f64,
-    pressure: f64,
-    tilt_x: f64,
-    tilt_y: f64,
-    rotation: f64,
+    x: f32,
+    y: f32,
+    pressure: f32,
+    tilt_x: f32,
+    tilt_y: f32,
+    rotation: f32,
     eraser: bool,
 };
 
@@ -64,12 +65,12 @@ pub const PenButton = struct {
     window_id: u32,
     pen_id: u32,
     button: u8,
-    x: f64,
-    y: f64,
-    pressure: f64,
-    tilt_x: f64,
-    tilt_y: f64,
-    rotation: f64,
+    x: f32,
+    y: f32,
+    pressure: f32,
+    tilt_x: f32,
+    tilt_y: f32,
+    rotation: f32,
     eraser: bool,
 };
 
@@ -101,21 +102,20 @@ pub const FileDrop = struct {
     uris: []const u8,
 };
 
+/// Tagged payload for custom events. The tag tells the reader which field is
+/// valid; no untagged guesses are needed.
+pub const CustomValue = union(enum) {
+    uint: u32,
+    int: i32,
+    float: f64,
+    boolean: bool,
+};
+
 pub const CustomType = struct {
     window_id: u32,
     ev_type: u32,
-    act: union {
-        act_u: u32,
-        act_i: i32,
-        act_f: f64,
-        act_b: bool,
-    },
-    act_2: union {
-        act_u: u32,
-        act_i: i32,
-        act_f: f64,
-        act_b: bool,
-    },
+    act: CustomValue,
+    act_2: CustomValue,
 };
 
 const CoreEvent = union(enum) {

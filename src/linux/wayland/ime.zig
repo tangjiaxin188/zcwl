@@ -17,7 +17,9 @@ pub const Ime = struct {
     object: *c.struct_zwp_text_input_v3,
     sink: Sink,
     focused_window: ?u32 = null,
-    enabled: bool = false,
+    /// Mirrors the last state actually sent on the wire; avoids duplicate
+    /// enable/disable requests, which reset IME state.
+    active: bool = false,
     cursor_pos: General.Position = .{ .x = 0, .y = 0 },
     cursor_size: General.Size = .{ .w = 0, .h = 0 },
 
@@ -26,7 +28,8 @@ pub const Ime = struct {
         seat: ?*c.struct_wl_seat,
         sink: Sink,
     ) ?Ime {
-        const object = c.zwp_text_input_manager_v3_get_text_input(manager, seat) orelse return null;
+        const usable_seat = seat orelse return null;
+        const object = c.zwp_text_input_manager_v3_get_text_input(manager, usable_seat) orelse return null;
         return Ime{ .object = object, .sink = sink };
     }
 
@@ -40,18 +43,18 @@ pub const Ime = struct {
         c.zwp_text_input_v3_destroy(self.object);
     }
 
-    pub fn setAllowed(self: *Ime, allowed: bool) void {
-        self.enabled = allowed;
-        if (allowed) {
-            c.zwp_text_input_v3_enable(self.object);
-        } else {
-            c.zwp_text_input_v3_disable(self.object);
-        }
-        c.zwp_text_input_v3_commit(self.object);
+    /// Re-evaluate enable/disable after a per-window `ime_allowed` change.
+    pub fn refresh(self: *Ime) void {
+        self.apply();
+    }
+
+    /// Drop focus state when a window is destroyed.
+    pub fn windowDestroyed(self: *Ime, window_id: u32) void {
+        if (self.focused_window == window_id) self.focus(null);
     }
 
     pub fn setCursorArea(self: *Ime, window_id: u32, pos: General.Position, size: General.Size) void {
-        if (self.focused_window != window_id or !self.enabled) return;
+        if (self.focused_window != window_id or !self.active) return;
         self.cursor_pos = pos;
         self.cursor_size = size;
         c.zwp_text_input_v3_set_cursor_rectangle(self.object, pos.x, pos.y, @intCast(size.w), @intCast(size.h));
@@ -59,16 +62,23 @@ pub const Ime = struct {
     }
 
     pub fn focus(self: *Ime, window_id: ?u32) void {
+        if (self.focused_window == window_id) return;
         self.focused_window = window_id;
-        if (self.enabled) {
-            if (window_id != null) {
-                c.zwp_text_input_v3_enable(self.object);
-                c.zwp_text_input_v3_set_cursor_rectangle(self.object, self.cursor_pos.x, self.cursor_pos.y, @intCast(self.cursor_size.w), @intCast(self.cursor_size.h));
-            } else {
-                c.zwp_text_input_v3_disable(self.object);
-            }
-            c.zwp_text_input_v3_commit(self.object);
+        self.apply();
+    }
+
+    fn apply(self: *Ime) void {
+        const focused = self.focused_window;
+        const should_enable = if (focused) |id| self.sink.imeAllowed(id) else false;
+        if (should_enable == self.active) return;
+        self.active = should_enable;
+        if (should_enable) {
+            c.zwp_text_input_v3_enable(self.object);
+            c.zwp_text_input_v3_set_cursor_rectangle(self.object, self.cursor_pos.x, self.cursor_pos.y, @intCast(self.cursor_size.w), @intCast(self.cursor_size.h));
+        } else {
+            c.zwp_text_input_v3_disable(self.object);
         }
+        c.zwp_text_input_v3_commit(self.object);
     }
 
     const listener = c.struct_zwp_text_input_v3_listener{
@@ -86,14 +96,14 @@ pub const Ime = struct {
     fn onEnter(data: ?*anyopaque, text_input: ?*c.struct_zwp_text_input_v3, surface: ?*c.struct_wl_surface) callconv(.c) void {
         _ = text_input;
         const self: *Ime = @ptrCast(@alignCast(data orelse return));
-        self.focused_window = self.sink.windowForSurface(surface);
+        self.focus(self.sink.windowForSurface(surface));
     }
 
     fn onLeave(data: ?*anyopaque, text_input: ?*c.struct_zwp_text_input_v3, surface: ?*c.struct_wl_surface) callconv(.c) void {
         _ = text_input;
         _ = surface;
         const self: *Ime = @ptrCast(@alignCast(data orelse return));
-        self.focused_window = null;
+        self.focus(null);
     }
 
     fn onPreedit(data: ?*anyopaque, text_input: ?*c.struct_zwp_text_input_v3, text: [*c]const u8, cursor_begin: i32, cursor_end: i32) callconv(.c) void {

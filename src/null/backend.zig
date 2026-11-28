@@ -5,8 +5,8 @@
 //! creation is not supported (`error.Unsupported`) and the Vulkan helpers are
 //! empty.
 //!
-//! `init` reports static system information through the opt-in
-//! `General.info_reporter`; the backend never logs or performs I/O by itself.
+//! `init` reports static system information through the App-owned
+//! `config.reporter`; the backend never logs or performs I/O by itself.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -15,11 +15,13 @@ const Event = @import("../Event.zig");
 const General = @import("../General.zig");
 const Config = @import("../Config.zig");
 const Vulkan = @import("../Vulkan.zig");
+const Queue = @import("../EventQueue.zig").Queue;
 
 pub const Backend = @This();
 
 alloc: std.mem.Allocator,
-queue: std.ArrayList(Event.Core) = .empty,
+reporter: General.Reporter,
+queue: Queue,
 next_id: u32 = 1,
 
 /// Shared WSI descriptor (`ndt`/`nwh`); both null for the null backend.
@@ -34,12 +36,15 @@ pub const NativeContext = struct {
 };
 
 pub fn init(alloc: std.mem.Allocator, config: Config.AppConfig) !*Backend {
-    _ = config;
     const b = try alloc.create(Backend);
-    b.* = .{ .alloc = alloc };
+    b.* = .{
+        .alloc = alloc,
+        .reporter = config.reporter,
+        .queue = Queue.init(alloc),
+    };
 
     // Opt-in only: no reporter installed means no logging and no I/O.
-    General.reportInfo(.{
+    config.reporter.reportInfo(.{
         .os = builtin.os.tag,
         .arch = builtin.cpu.arch,
         .backend = "null",
@@ -48,23 +53,27 @@ pub fn init(alloc: std.mem.Allocator, config: Config.AppConfig) !*Backend {
 }
 
 pub fn uninit(self: *Backend) void {
-    self.queue.deinit(self.alloc);
+    self.queue.deinit();
     self.alloc.destroy(self);
 }
 
 pub fn initWindow(self: *Backend, config: Config.WindowConfig) !*Window {
+    const title = try self.alloc.dupe(u8, config.title);
+    errdefer self.alloc.free(title);
     const w = try self.alloc.create(Window);
+    errdefer self.alloc.destroy(w);
     w.* = .{
         .backend = self,
         .id = self.next_id,
         .native = .{},
-        .title = config.title,
+        .title = title,
         .size = config.size,
         .pos = config.position,
         .resizable = config.resizable,
         .decorated = config.decorated,
         .always_on_top = config.always_on_top,
         .client_api = config.client_api,
+        .visible = config.visible,
     };
     self.next_id += 1;
     return w;
@@ -84,16 +93,16 @@ pub fn initContext(
 }
 
 pub fn pollEvent(self: *Backend, ev: *Event.Core) bool {
-    if (self.queue.items.len == 0) {
-        ev.* = .none;
-        return false;
+    if (self.queue.pop()) |event| {
+        ev.* = event;
+        return true;
     }
-    ev.* = self.queue.orderedRemove(0);
-    return true;
+    ev.* = .none;
+    return false;
 }
 
 pub fn pushEvent(self: *Backend, ev: Event.Core) void {
-    self.queue.append(self.alloc, ev) catch |err| General.reportError(err);
+    if (!self.queue.push(ev)) self.reporter.reportError(error.OutOfMemory);
 }
 
 pub fn getVulkanInstanceExtensions(self: *Backend) []const [*:0]const u8 {
@@ -176,6 +185,7 @@ pub const Window = struct {
     decorated: bool = true,
     always_on_top: bool = false,
     opacity: f32 = 1.0,
+    visible: bool = true,
     ime_allowed: bool = false,
     ime_pos: General.Position = .{ .x = 0, .y = 0 },
     ime_size: General.Size = .{ .w = 0, .h = 0 },
@@ -185,6 +195,7 @@ pub const Window = struct {
     }
 
     pub fn uninit(self: *Window) void {
+        self.backend.alloc.free(self.title);
         self.backend.alloc.destroy(self);
     }
 
@@ -193,20 +204,23 @@ pub const Window = struct {
         return self.native;
     }
 
-    /// Borrowed for the lifetime of the window; the null backend never copies.
+    /// Like the Wayland backend, the input is copied; `getTitle` borrows the
+    /// copy until the next `setTitle`.
     pub fn setTitle(self: *Window, title: []const u8) !void {
-        self.title = title;
+        const copy = try self.backend.alloc.dupe(u8, title);
+        self.backend.alloc.free(self.title);
+        self.title = copy;
     }
 
     pub fn getTitle(self: *Window) []const u8 {
         return self.title;
     }
 
-    pub fn setMaxSize(self: *Window, max_size: ?General.Size) void {
+    pub fn setMaxSize(self: *Window, max_size: ?General.Size) !void {
         self.max_size = max_size;
     }
 
-    pub fn setSize(self: *Window, size: General.Size) void {
+    pub fn setSize(self: *Window, size: General.Size) !void {
         self.size = size;
     }
 
@@ -214,7 +228,7 @@ pub const Window = struct {
         return self.size;
     }
 
-    pub fn setPos(self: *Window, pos: General.Position) void {
+    pub fn setPos(self: *Window, pos: General.Position) !void {
         self.pos = pos;
     }
 
@@ -223,21 +237,18 @@ pub const Window = struct {
     }
 
     pub fn getFramebufferSize(self: *Window) General.Size {
-        return .{
-            .w = @intFromFloat(@as(f32, @floatFromInt(self.size.w)) * self.dpi),
-            .h = @intFromFloat(@as(f32, @floatFromInt(self.size.h)) * self.dpi),
-        };
+        return General.scaledSize(self.size, self.dpi);
     }
 
     pub fn getDpiScale(self: *Window) f32 {
         return self.dpi;
     }
 
-    pub fn setResizable(self: *Window, resizable: bool) void {
+    pub fn setResizable(self: *Window, resizable: bool) !void {
         self.resizable = resizable;
     }
 
-    pub fn setMinSize(self: *Window, min_size: ?General.Size) void {
+    pub fn setMinSize(self: *Window, min_size: ?General.Size) !void {
         self.min_size = min_size;
     }
 
@@ -262,15 +273,15 @@ pub const Window = struct {
         return error.Unsupported;
     }
 
-    pub fn setFocus(self: *Window) void {
+    pub fn setFocus(self: *Window) !void {
         self.focused = true;
     }
 
-    pub fn minimize(self: *Window) void {
+    pub fn minimize(self: *Window) !void {
         self.minimized = true;
     }
 
-    pub fn maximize(self: *Window) void {
+    pub fn maximize(self: *Window) !void {
         self.maximized = true;
     }
 
@@ -278,7 +289,7 @@ pub const Window = struct {
         self.ime_allowed = allowed;
     }
 
-    pub fn setImeCursorArea(self: *Window, pos: General.Position, size: General.Size) void {
+    pub fn setImeCursorArea(self: *Window, pos: General.Position, size: General.Size) !void {
         self.ime_pos = pos;
         self.ime_size = size;
     }
@@ -317,14 +328,19 @@ pub const Window = struct {
     }
 
     pub fn setOpacity(self: *Window, opacity: f32) !void {
-        self.opacity = opacity;
+        if (!std.math.isFinite(opacity)) return error.InvalidOpacity;
+        self.opacity = std.math.clamp(opacity, 0.0, 1.0);
     }
 
-    pub fn setCursorVisible(self: *Window, visible: bool) void {
+    pub fn setVisible(self: *Window, visible: bool) !void {
+        self.visible = visible;
+    }
+
+    pub fn setCursorVisible(self: *Window, visible: bool) !void {
         self.cursor_visible = visible;
     }
 
-    pub fn setAspectRatio(self: *Window, ratio: ?General.Ratio) void {
+    pub fn setAspectRatio(self: *Window, ratio: ?General.Ratio) !void {
         self.aspect_ratio = ratio;
     }
 

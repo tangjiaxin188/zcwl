@@ -12,3 +12,10 @@ const version = "v0.0.1-wl";
 pub fn getVersion() []const u8 {
     return version;
 }
+
+// Pull internal unit tests into `zig build test-unit`.
+test {
+    _ = @import("EventQueue.zig");
+    _ = @import("cursor_image.zig");
+    _ = @import("General.zig");
+}

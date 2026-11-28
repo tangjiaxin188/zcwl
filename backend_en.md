@@ -3,10 +3,12 @@
 > Chinese version: [`backend_zh.md`](backend_zh.md)
 
 **Status**: This document is the complete backend contract already consumed by
-the platform-independent layer. Only `src/null/backend.zig` exists today; every
-`-Dbackend=...` selection falls back to null. A real backend must implement
-this contract; `test/api_test.zig` checks at compile time that the public API
-and the backend methods it calls exist with matching signatures.
+the platform-independent layer. Implemented backends:
+`src/linux/wayland/backend.zig` and `src/null/backend.zig`. Unimplemented
+choices (x11/both/windows/macos) are rejected by `build.zig` instead of falling
+back to null. A real backend must implement this contract; `Backend.zig` has
+compile-time declaration checks and `test/api_test.zig` checks the public API
+and behavior.
 
 ---
 
@@ -39,7 +41,7 @@ Rules:
 - Platform code must not import the upper wrappers (`App.zig`, `Window.zig`,
   `Context.zig`).
 - Shared leaf modules are only `General.zig`, `Config.zig`, `Event.zig`,
-  `Vulkan.zig`.
+  `Vulkan.zig`, `EventQueue.zig`.
 - `Backend.zig` re-exports the selected backend's
   `Backend`/`Window`/`Context`/`NativeContext`/functions at compile time.
 
@@ -194,10 +196,11 @@ pub fn clearCursorImage(self: *Window, state: General.Cursor) !void;
 
 Custom cursor rules:
 
-- `Config.CursorImage.pixels` is row-major RGBA8 with `width * height * 4` bytes;
-- `setCursorImage(state, image)` configures an image for one `General.Cursor` state;
+- `Config.CursorImage.pixels` is row-major straight-alpha RGBA8 with exactly `width * height * 4` bytes;
+- the library premultiplies alpha into `WL_SHM_FORMAT_ARGB8888`;
+- `setCursorImage(state, image)` configures an image for one `General.Cursor` state; it is application-global per state (last writer wins);
 - `setCursor(state)` prefers that state's image when present;
-- `clearCursorImage(state)` removes it and restores the system shape;
+- `clearCursorImage(state)` removes it and restores the system shape for all windows;
 - the library only creates the `wl_shm` surface and calls `wl_pointer.set_cursor`; no built-in move/file pattern;
 - no custom image means no cursor change.
 
@@ -243,28 +246,28 @@ pub const Window = struct {
     pub fn setTitle(self: *Window, title: []const u8) !void;
     pub fn getTitle(self: *Window) []const u8; // borrowed until next set
 
-    pub fn setMaxSize(self: *Window, max_size: ?General.Size) void;
-    pub fn setMinSize(self: *Window, min_size: ?General.Size) void;
-    pub fn setSize(self: *Window, size: General.Size) void;
+    pub fn setMaxSize(self: *Window, max_size: ?General.Size) !void;
+    pub fn setMinSize(self: *Window, min_size: ?General.Size) !void;
+    pub fn setSize(self: *Window, size: General.Size) !void;
     pub fn getSize(self: *Window) General.Size;
-    pub fn setPos(self: *Window, pos: General.Position) void;
+    pub fn setPos(self: *Window, pos: General.Position) !void;
     pub fn getPos(self: *Window) ?General.Position;
     pub fn getFramebufferSize(self: *Window) General.Size;
     pub fn getDpiScale(self: *Window) f32;
 
-    pub fn setResizable(self: *Window, resizable: bool) void;
+    pub fn setResizable(self: *Window, resizable: bool) !void;
     pub fn setFullscreen(self: *Window, fullscreen: bool) !void;
-    pub fn minimize(self: *Window) void;
-    pub fn maximize(self: *Window) void;
-    pub fn setFocus(self: *Window) void;
+    pub fn minimize(self: *Window) !void;
+    pub fn maximize(self: *Window) !void;
+    pub fn setFocus(self: *Window) !void;
     pub fn requestAttention(self: *Window) !void;
 
     pub fn setCursor(self: *Window, cursor: General.Cursor) !void;
-    pub fn setCursorVisible(self: *Window, visible: bool) void;
-    pub fn setAspectRatio(self: *Window, ratio: ?General.Ratio) void;
+    pub fn setCursorVisible(self: *Window, visible: bool) !void;
+    pub fn setAspectRatio(self: *Window, ratio: ?General.Ratio) !void;
 
     pub fn setImeAllowed(self: *Window, allowed: bool) !void;
-    pub fn setImeCursorArea(self: *Window, pos: General.Position, size: General.Size) void;
+    pub fn setImeCursorArea(self: *Window, pos: General.Position, size: General.Size) !void;
 
     pub fn getInfo(self: *Window) General.WindowInfo;
 
@@ -272,6 +275,7 @@ pub const Window = struct {
     pub fn setDecorated(self: *Window, decorated: bool) !void;
     pub fn setAlwaysOnTop(self: *Window, always_on_top: bool) !void;
     pub fn setOpacity(self: *Window, opacity: f32) !void;
+    pub fn setVisible(self: *Window, visible: bool) !void;
 
     pub fn createVulkanSurface(
         self: *Window,
@@ -299,14 +303,15 @@ pub const Window = struct {
 | `setFocus` | Request focus; the platform may ignore it (Wayland: compositor decides). |
 | `requestAttention` | Request user attention; return `error.Unsupported` if unavailable. |
 | `setCursor` | Set the cursor shape; return an error on failure. |
-| `setCursorVisible` | Show/hide the cursor; no-op/record when unsupported. |
+| `setCursorVisible` | Show/hide the cursor; `Unsupported` without a pointer, `WouldBlock` without a valid serial. |
 | `setAspectRatio` | Aspect-ratio constraint; `null` clears; no-op/record when unsupported. |
 | `setImeAllowed` / `setImeCursorArea` | Enable IME / set the candidate area; return an error or no-op per platform. |
 | `getInfo` | Return a consistent snapshot; all getters should derive from it. |
 | `setIcon` | RGBA8 icon; return `error.Unsupported` when unavailable. |
 | `setDecorated` | Toggle decorations; Wayland uses xdg-decoration/CSD, other platforms their native API. |
 | `setAlwaysOnTop` | Always-on-top; xdg-shell has no standard support, so `error.Unsupported` is allowed. |
-| `setOpacity` | Whole-window opacity; failures are reported by the upper layer via `General.error_reporter`, never thrown. |
+| `setOpacity` | Whole-window opacity; failures are returned directly to the caller. |
+| `setVisible` | Show/hide the window; return `error.Unsupported` when hiding is impossible. Wayland only delays the first map. |
 | `createVulkanSurface` | Create `VkSurfaceKHR` via the caller's loader; succeeds once per window, later calls return `error.WindowHadVulkanSurface`. |
 
 Notes:
@@ -368,12 +373,17 @@ mechanism (EGL/WGL/CGL); a different display/backend returns
   otherwise main thread only.
 - **Errors**: Unsupported features return `error.Unsupported`; upper-layer
   gates use `error.UnsupportedApi`; other agreed names:
-  `WindowHadContext`, `WindowHadVulkanSurface`, `IncompatibleShareContext`.
+  `WindowHadContext`, `WindowHadVulkanSurface`, `IncompatibleShareContext`,
+  `BackendUnavailable`, `InvalidRatio`, `NotCurrent`. `WouldBlock` means a
+  missing pointer serial or pending async clipboard data (documented per API).
 - **No panics for normal unsupported paths**: Do not panic for “platform
   unsupported”; only contract violations (null pointers, double init, ...) may
-  panic/unreachable.
-- **Opacity**: The upper `Window.setOpacity` catches backend `!void` errors and
-  forwards them to `General.error_reporter`; the backend just returns an error.
+  panic/unreachable. Unimplemented backends are rejected by `build.zig`.
+- **Diagnostics**: Backends use `config.reporter.reportError/reportInfo` for
+  diagnostics that cannot be returned. Subsystems holding a `Sink` call
+  `sink.report(err)`; those holding `*Backend` call `backend.reportError(err)`.
+  Upper-layer setters return errors directly instead of routing them to a
+  reporter.
 - **Thread safety**: `Backend`/`Window`/`Context` are not thread-safe by
   default; callers must synchronize. The “current context” state is tracked by
   a `threadlocal` in the upper layer.
@@ -385,8 +395,17 @@ mechanism (EGL/WGL/CGL); a different display/backend returns
 - `build.zig`'s `-Dbackend=auto|null|wayland|x11|both|windows|macos` selects the
   backend; `auto` is resolved and validated by `build.zig` from the target OS.
 - `src/Backend.zig` only dispatches at compile time: `Kind =
-  General.BackendKind`; `effective` is the linked backend; unimplemented
-  selections fall back to null.
+  General.BackendKind`; `effective` equals `kind`. Unimplemented selections are
+  rejected by `build.zig`, with `error.BackendUnavailable` as a runtime guard in
+  `App.init`.
+- `src/backend_selected.zig` is generated by `build.zig` (gitignored) and
+  contains exactly one `@import`. A static comptime switch is not equivalent:
+  Zig still resolves imports in unselected arms, which would make null-only
+  builds depend on generated Wayland headers. Parallel builds with different
+  `-Dbackend` values share this file and must be serialized. Selector and
+  protocol files are written atomically (temp + rename), and `Backend.zig`
+  checks the selector's `name` against `-Dbackend` to fail clearly if a
+  concurrent build overwrote it.
 - `src/root.zig` exports `Backend`; users can name `Backend.NativeContext` and
   query platform/context creator via `App.getBackendInfo()`.
 
@@ -395,7 +414,7 @@ mechanism (EGL/WGL/CGL); a different display/backend returns
 ## 8. Contract test
 
 ```bash
-zig build test null
+zig build test -Dbackend=null
 ```
 
 `test/api_test.zig`:
@@ -404,4 +423,7 @@ zig build test null
   wrappers;
 - calls `App.init` / `createWindow` / `createContext` and checks backend method
   signatures;
-- passes no mocks and asserts no platform behavior.
+- with the null backend, asserts platform-independent behavior (event queue,
+  window destruction, API gates, ratio validation);
+- passes no mocks and asserts no backend-specific platform behavior. Without a
+  compositor the Wayland suite skips most cases silently.

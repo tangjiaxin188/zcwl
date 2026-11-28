@@ -1,5 +1,5 @@
 //! Triangle example: creates a window, logs keyboard/mouse/window events and
-//! draws a colored triangle with OpenGL / OpenGL ES.
+//! draws a colored triangle with OpenGL 3.3 core.
 
 const std = @import("std");
 const zcwl = @import("zcwl");
@@ -8,9 +8,6 @@ const gl = @import("opengl.zig");
 const allocator = std.heap.page_allocator;
 
 pub fn main(init: std.process.Init) !void {
-    zcwl.General.error_reporter = reportError;
-    zcwl.General.info_reporter = reportInfo;
-
     var args = try std.process.Args.iterateAllocator(init.minimal.args, allocator);
     defer args.deinit();
     const argv0 = args.next() orelse return error.MissingExecutablePath;
@@ -19,6 +16,10 @@ pub fn main(init: std.process.Init) !void {
 
     const app = try zcwl.App.init(allocator, .{
         .application_id = "org.zcwl.example.triangle",
+        .reporter = .{
+            .error_fn = reportError,
+            .info_fn = reportInfo,
+        },
     });
     defer app.uninit();
 
@@ -29,19 +30,13 @@ pub fn main(init: std.process.Init) !void {
     });
     defer window.destroy();
 
-    const context = window.createContext(.{
+    // The window reserves .opengl, so the context must request the same API.
+    const context = try window.createContext(.{
         .api = .opengl,
         .major = 3,
         .minor = 3,
         .profile = .core,
-    }, null) catch |err| blk: {
-        std.log.warn("OpenGL 3.3 context unavailable ({s}), trying OpenGL ES 3", .{@errorName(err)});
-        break :blk try window.createContext(.{
-            .api = .opengles,
-            .major = 3,
-            .minor = 0,
-        }, null);
-    };
+    }, null);
     defer window.destroyContext();
 
     try context.makeCurrent();
@@ -53,8 +48,9 @@ pub fn main(init: std.process.Init) !void {
     };
     updateImeArea(window);
 
-    std.log.info("triangle window ready (backend={s})", .{
+    std.log.info("triangle window ready (backend={s}) \n      title = ({s})", .{
         @tagName(app.getBackendInfo().effective),
+        window.getTitle(),
     });
 
     var running = true;
@@ -181,9 +177,10 @@ pub fn main(init: std.process.Init) !void {
         const fb = window.getFramebufferSize();
         if (fb.w > 0 and fb.h > 0) {
             renderer.draw(fb.w, fb.h);
-            context.swapBuffers() catch |err| switch (err) {
-                error.WouldBlock => {},
-                else => return err,
+            context.swapBuffers() catch |err| {
+                // The null backend has no WouldBlock in its error set, so
+                // compare by name instead of switching on the error value.
+                if (std.mem.eql(u8, @errorName(err), "WouldBlock")) {} else return err;
             };
         }
 
@@ -213,7 +210,9 @@ fn updateImeArea(window: *zcwl.Window) void {
     window.setImeCursorArea(
         .{ .x = @intCast(size.w / 2), .y = @intCast(size.h / 2) },
         .{ .w = 1, .h = 1 },
-    );
+    ) catch |err| {
+        std.log.warn("setImeCursorArea failed: {s}", .{@errorName(err)});
+    };
 }
 const vertex_shader_gl: [:0]const u8 =
     \\#version 330 core

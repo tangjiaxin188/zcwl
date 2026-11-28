@@ -4,6 +4,35 @@ pub const Size = struct { w: u32, h: u32 };
 pub const Position = struct { x: i32, y: i32 };
 pub const Vector2 = struct { x: f32, y: f32 };
 
+/// Scale a logical size to physical pixels without panicking on extreme or
+/// non-finite values. Results saturate at `maxInt(u32)`.
+pub fn scaledSize(size: Size, scale: f32) Size {
+    return .{
+        .w = scaledDimension(size.w, scale),
+        .h = scaledDimension(size.h, scale),
+    };
+}
+
+fn scaledDimension(value: u32, scale: f32) u32 {
+    const effective: f32 = if (std.math.isFinite(scale) and scale > 0.0) scale else 1.0;
+    const scaled: f64 = @as(f64, @floatFromInt(value)) * @as(f64, effective);
+    if (scaled <= 0.0) return 0;
+    if (scaled >= @as(f64, @floatFromInt(std.math.maxInt(u32)))) return std.math.maxInt(u32);
+    return @intFromFloat(scaled);
+}
+
+test "scaledSize scales and saturates" {
+    const normal = scaledSize(.{ .w = 100, .h = 50 }, 2.0);
+    try std.testing.expectEqual(@as(u32, 200), normal.w);
+    try std.testing.expectEqual(@as(u32, 100), normal.h);
+
+    const invalid = scaledSize(.{ .w = 100, .h = 50 }, std.math.nan(f32));
+    try std.testing.expectEqual(@as(u32, 100), invalid.w);
+
+    const huge = scaledSize(.{ .w = std.math.maxInt(u32), .h = 1 }, 2.0);
+    try std.testing.expectEqual(std.math.maxInt(u32), huge.w);
+}
+
 /// Standard cursor shapes; `.arrow` is the default.
 /// Semantic cursor states/shapes. `Window.setCursor` selects the current
 /// state; `Window.setCursorImage` can attach a caller-drawn image to one state.
@@ -104,27 +133,30 @@ pub const BackendInfo = struct {
     arch: std.Target.Cpu.Arch,
 };
 
-/// Optional sink for errors that cannot be returned. Default: silent/no I/O.
-pub const ErrorReporter = *const fn (err: anyerror) void;
-
-pub var error_reporter: ?ErrorReporter = null;
-
-/// Cheap no-op unless the application installed a reporter.
-pub inline fn reportError(err: anyerror) void {
-    if (error_reporter) |report| report(err);
-}
-
-/// Static system information for the opt-in info reporter below.
+/// Static system information passed to the info reporter.
 pub const SystemInfo = struct {
     os: std.Target.Os.Tag,
     arch: std.Target.Cpu.Arch,
     backend: []const u8,
 };
 
-/// Optional sink for informational messages. Default: silent/no I/O.
+pub const ErrorReporter = *const fn (err: anyerror) void;
 pub const InfoReporter = *const fn (info: SystemInfo) void;
-pub var info_reporter: ?InfoReporter = null;
 
-pub inline fn reportInfo(info: SystemInfo) void {
-    if (info_reporter) |report| report(info);
-}
+/// Per-application sinks for diagnostics that cannot be returned to the
+/// caller. Stored by value in `App` and in the selected backend; there is no
+/// process-global reporter state. Both sinks default to silent/no I/O.
+pub const Reporter = struct {
+    error_fn: ?ErrorReporter = null,
+    info_fn: ?InfoReporter = null,
+
+    /// Cheap no-op unless the application installed an error reporter.
+    pub inline fn reportError(self: Reporter, err: anyerror) void {
+        if (self.error_fn) |report| report(err);
+    }
+
+    /// Cheap no-op unless the application installed an info reporter.
+    pub inline fn reportInfo(self: Reporter, info: SystemInfo) void {
+        if (self.info_fn) |report| report(info);
+    }
+};

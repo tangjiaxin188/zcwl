@@ -11,17 +11,29 @@ const ProcAddr = General.ProcAddr;
 
 alloc: std.mem.Allocator,
 backendContext: *Backend.Context,
+backend: *Backend.Handle,
 kind: General.GraphicsApi,
+reporter: General.Reporter,
+/// Slot in the owning `Window`; cleared on teardown so a direct `uninit()`
+/// cannot leave `Window.context` dangling.
+owner: ?*?*Context = null,
 
 /// mirror of the context bound on this thread; each thread has its own slot
 threadlocal var _current: ?*Context = null;
 
-pub fn init(alloc: std.mem.Allocator, bctx: *Backend.Context) !*Context {
+pub fn init(
+    alloc: std.mem.Allocator,
+    bctx: *Backend.Context,
+    reporter: General.Reporter,
+    backend: *Backend.Handle,
+) !*Context {
     const ctx = try alloc.create(Context);
     ctx.* = .{
         .alloc = alloc,
         .backendContext = bctx,
+        .backend = backend,
         .kind = bctx.getKind(),
+        .reporter = reporter,
     };
     return ctx;
 }
@@ -42,11 +54,17 @@ pub fn getNative(self: *Context) *const Backend.NativeContext {
     return self.backendContext.getNative();
 }
 
-/// Destroy this context. Bound-thread unbind failures go to
-/// `General.error_reporter`.
+/// Internal teardown called by `Window`. Bound-thread unbind failures go to
+/// this App's reporter. Destroy the context on the thread that made it
+/// current, or call `clearCurrent()` there first; the cached current-context
+/// pointer is thread-local and cannot be repaired from another thread.
 pub fn uninit(self: *Context) void {
+    if (self.owner) |slot| {
+        if (slot.* == self) slot.* = null;
+        self.owner = null;
+    }
     if (_current == self) {
-        self.backendContext.clearCurrent() catch |err| General.reportError(err);
+        self.backendContext.clearCurrent() catch |err| self.reporter.reportError(err);
         _current = null;
     }
     self.backendContext.uninit();
@@ -59,12 +77,13 @@ pub fn makeCurrent(self: *Context) !void {
     _current = self;
 }
 
-/// Unbind the current thread's context; no-op if none is bound.
-pub fn clearCurrent() !void {
-    if (_current) |old| {
-        try old.backendContext.clearCurrent();
-        _current = null;
-    }
+/// Unbind this context from the calling thread.
+/// Returns `error.NotCurrent` when this context is not bound on this thread;
+/// a context bound on another thread cannot be released from here.
+pub fn clearCurrent(self: *Context) !void {
+    if (_current != self) return error.NotCurrent;
+    try self.backendContext.clearCurrent();
+    _current = null;
 }
 
 /// The context bound on the calling thread, if any.

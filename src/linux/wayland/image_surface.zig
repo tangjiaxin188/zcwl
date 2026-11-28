@@ -1,8 +1,9 @@
-//! Caller-provided RGBA image converted to a Wayland `wl_shm` surface.
-//! This module does not draw any cursor or drag icon of its own.
+//! Caller-provided straight-alpha RGBA image converted to a Wayland `wl_shm`
+//! surface. This module does not draw any cursor or drag icon of its own.
 
 const std = @import("std");
 const Config = @import("../../Config.zig");
+const cursor_image = @import("../../cursor_image.zig");
 const c = @import("protocols.zig").c;
 
 pub const ImageSurface = struct {
@@ -23,21 +24,16 @@ pub fn create(
     shm: ?*c.struct_wl_shm,
     image: Config.CursorImage,
 ) !ImageSurface {
-    if (image.width == 0 or image.height == 0) return error.InvalidArgument;
-    const width: usize = @intCast(image.width);
-    const height: usize = @intCast(image.height);
-    const pixel_count = std.math.mul(usize, width, height) catch return error.InvalidArgument;
-    const byte_size = std.math.mul(usize, pixel_count, 4) catch return error.InvalidArgument;
-    if (image.pixels.len < byte_size) return error.InvalidArgument;
+    const layout = try cursor_image.layout(image);
     if (compositor == null or shm == null) return error.Unsupported;
 
     const fd = try std.posix.memfd_create("zcwl-image", 0);
     defer _ = std.c.close(fd);
-    if (std.c.ftruncate(fd, @intCast(byte_size)) != 0) return error.ImageCreateFailed;
+    if (std.c.ftruncate(fd, @intCast(layout.byte_size)) != 0) return error.ImageCreateFailed;
 
     const mem = try std.posix.mmap(
         null,
-        byte_size,
+        layout.byte_size,
         .{ .READ = true, .WRITE = true },
         .{ .TYPE = .SHARED },
         fd,
@@ -45,25 +41,27 @@ pub fn create(
     );
     errdefer std.posix.munmap(mem);
 
-    // Wayland ARGB8888 is little-endian 0xAARRGGBB; the caller supplies RGBA.
+    // Wayland ARGB8888 is little-endian 0xAARRGGBB with premultiplied alpha;
+    // the caller supplies straight-alpha RGBA.
     const pixels: [*]u32 = @ptrCast(@alignCast(mem.ptr));
-    for (0..pixel_count) |i| {
+    for (0..layout.pixel_count) |i| {
         const off = i * 4;
-        const r = image.pixels[off];
-        const g = image.pixels[off + 1];
-        const b = image.pixels[off + 2];
-        const a = image.pixels[off + 3];
-        pixels[i] = (@as(u32, a) << 24) | (@as(u32, r) << 16) | (@as(u32, g) << 8) | b;
+        pixels[i] = cursor_image.argbPremultiplied(
+            image.pixels[off],
+            image.pixels[off + 1],
+            image.pixels[off + 2],
+            image.pixels[off + 3],
+        );
     }
 
-    const pool = c.wl_shm_create_pool(shm, fd, @intCast(byte_size)) orelse
+    const pool = c.wl_shm_create_pool(shm, fd, @intCast(layout.byte_size)) orelse
         return error.ImageCreateFailed;
     const buffer = c.wl_shm_pool_create_buffer(
         pool,
         0,
         @intCast(image.width),
         @intCast(image.height),
-        @intCast(width * 4),
+        @intCast(layout.stride),
         @intCast(c.WL_SHM_FORMAT_ARGB8888),
     ) orelse {
         c.wl_shm_pool_destroy(pool);

@@ -138,7 +138,10 @@ pub fn init(
 
     if (api.makeCurrent(egl_display, egl_surface, egl_surface, egl_context) == 0)
         return error.EglMakeCurrentFailed;
-    errdefer _ = api.makeCurrent(egl_display, null, null, null);
+    // Querying GL strings needs a current context, but creation must not leave
+    // it bound: callers use `Context.makeCurrent()` explicitly, and the public
+    // Context tracks the bound thread.
+    defer _ = api.makeCurrent(egl_display, null, null, null);
 
     const self = try backend.alloc.create(Context);
     self.* = .{
@@ -236,10 +239,10 @@ fn queryGlInfo(self: *Context, api: *loader.Egl) void {
     const proc = api.getProcAddress("glGetString") orelse return;
     const get_string: *const fn (c_uint) callconv(.c) ?[*:0]const u8 = @ptrCast(proc);
 
-    self.owned_strings[0] = dupeZToSlice(self.alloc, get_string(0x1F00)); // GL_VENDOR
-    self.owned_strings[1] = dupeZToSlice(self.alloc, get_string(0x1F01)); // GL_RENDERER
-    self.owned_strings[2] = dupeZToSlice(self.alloc, get_string(0x1F02)); // GL_VERSION
-    self.owned_strings[3] = dupeZToSlice(self.alloc, get_string(0x8B8C)); // GL_SHADING_LANGUAGE_VERSION
+    self.owned_strings[0] = dupeZToSlice(self.alloc, get_string(0x1F00), self.backend.reporter); // GL_VENDOR
+    self.owned_strings[1] = dupeZToSlice(self.alloc, get_string(0x1F01), self.backend.reporter); // GL_RENDERER
+    self.owned_strings[2] = dupeZToSlice(self.alloc, get_string(0x1F02), self.backend.reporter); // GL_VERSION
+    self.owned_strings[3] = dupeZToSlice(self.alloc, get_string(0x8B8C), self.backend.reporter); // GL_SHADING_LANGUAGE_VERSION
 
     self.info.vendor = self.owned_strings[0] orelse "";
     self.info.renderer = self.owned_strings[1] orelse "";
@@ -247,10 +250,10 @@ fn queryGlInfo(self: *Context, api: *loader.Egl) void {
     self.info.shading_language = self.owned_strings[3] orelse "";
 }
 
-fn dupeZToSlice(alloc: std.mem.Allocator, value: ?[*:0]const u8) ?[]u8 {
+fn dupeZToSlice(alloc: std.mem.Allocator, value: ?[*:0]const u8, reporter: General.Reporter) ?[]u8 {
     const ptr = value orelse return null;
     return alloc.dupe(u8, std.mem.span(ptr)) catch |err| {
-        General.reportError(err);
+        reporter.reportError(err);
         return null;
     };
 }
